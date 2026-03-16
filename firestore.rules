@@ -1,0 +1,45 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Podium data collections — admin SDK only (Cloud Functions, backfill script).
+    // All client-side access is blocked; the dashboard reads via
+    // Firebase Auth-gated rules below.
+    match /podium_conversations/{doc} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+    match /podium_messages/{doc} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+    match /podium_contacts/{doc} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+    match /podium_reviews/{doc} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+    match /podium_invoices/{doc} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+    match /podium_users/{doc} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+    match /podium_webhook_log/{doc} {
+      allow read, write: if false;
+    }
+    match /backfill_state/{doc} {
+      allow read, write: if false;
+    }
+
+    // Existing token storage — admin only
+    match /podium_tokens/{doc} {
+      allow read, write: if false;
+    }
+  }
+}

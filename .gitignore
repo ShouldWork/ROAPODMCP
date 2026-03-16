@@ -64,6 +64,14 @@ node_modules/
 
 # dotenv environment variables file
 .env
+.env.*
+
+# Service account keys — never commit these
+**/service-account-key.json
+**/*firebase-adminsdk*.json
+
+# Dashboard build output
+dashboard/dist/
 
 # dataconnect generated files
 .dataconnect

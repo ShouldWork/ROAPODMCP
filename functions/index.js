@@ -6,6 +6,7 @@ const axios = require("axios");
 const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
 const { StreamableHTTPServerTransport } = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
 const { z } = require("zod");
+const crypto = require("crypto");
 
 initializeApp();
 
@@ -14,22 +15,20 @@ const PODIUM_CLIENT_ID = defineSecret("PODIUM_CLIENT_ID");
 const PODIUM_CLIENT_SECRET = defineSecret("PODIUM_CLIENT_SECRET");
 const PODIUM_REDIRECT_URI = defineSecret("PODIUM_REDIRECT_URI");
 const MCP_API_KEY = defineSecret("MCP_API_KEY");
+const PODIUM_WEBHOOK_SECRET = defineSecret("PODIUM_WEBHOOK_SECRET");
 
 // ── Constants ──────────────────────────────────────────────────────────────
 const PODIUM_AUTH_URL = "https://api.podium.com/oauth/authorize";
 const PODIUM_TOKEN_URL = "https://api.podium.com/oauth/token";
 const PODIUM_API_BASE = "https://api.podium.com/v4";
-
 const SCOPES = [
   "read_contacts",
+  "read_feedback",
   "read_locations",
-  "write_message",
-  "read_message",
+  "read_messages",
+  "write_messages",
   "read_payments",
-  "read_reporting",
   "read_reviews",
-  "read_templates",
-  "write_templates",
   "read_users",
 ].join(" ");
 
@@ -38,10 +37,6 @@ const SCOPES = [
 /**
  * Load the stored access token from Firestore, refreshing it automatically
  * if it has expired (or will expire within 5 minutes).
- *
- * @param {string} clientId
- * @param {string} clientSecret
- * @returns {Promise<string>} valid access_token
  */
 async function getPodiumAccessToken(clientId, clientSecret) {
   const db = getFirestore();
@@ -51,16 +46,14 @@ async function getPodiumAccessToken(clientId, clientSecret) {
   const data = doc.data();
   const { access_token, refresh_token, expires_in, updated_at } = data;
 
-  // Check expiry with a 5-minute safety buffer
   const updatedMs = new Date(updated_at).getTime();
   const expiresMs = updatedMs + expires_in * 1000;
   const BUFFER_MS = 5 * 60 * 1000;
 
   if (Date.now() < expiresMs - BUFFER_MS) {
-    return access_token; // still valid
+    return access_token;
   }
 
-  // Token expired — refresh it
   const response = await axios.post(
     PODIUM_TOKEN_URL,
     new URLSearchParams({
@@ -81,40 +74,99 @@ async function getPodiumAccessToken(clientId, clientSecret) {
   return tokens.access_token;
 }
 
-/** Axios instance factory pre-configured with the Podium bearer token. */
+/** Axios instance factory with Podium bearer token and version header. */
 function podiumClient(accessToken) {
-  return axios.create({
+  const client = axios.create({
     baseURL: PODIUM_API_BASE,
-    headers: { Authorization: `Bearer ${accessToken}` },
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
   });
+
+  // Retry interceptor: 429 with exponential backoff, invalid_cursor recovery
+  client.interceptors.response.use(null, async (error) => {
+    const config = error.config;
+    if (!config) throw error;
+    config._retryCount = config._retryCount || 0;
+
+    // 429 Too Many Requests — retry up to 3 times
+    if (error.response?.status === 429 && config._retryCount < 3) {
+      config._retryCount++;
+      const delay = Math.pow(2, config._retryCount - 1) * 1000;
+      await new Promise((r) => setTimeout(r, delay));
+      return client.request(config);
+    }
+
+    // Invalid cursor — retry without the cursor param
+    const errCode = error.response?.data?.code || error.response?.data?.error?.code;
+    if (errCode === "invalid_cursor" && config.params?.cursor) {
+      delete config.params.cursor;
+      config._retryCount++;
+      return client.request(config);
+    }
+
+    throw error;
+  });
+
+  return client;
+}
+
+// ── Shared helpers ─────────────────────────────────────────────────────────
+
+/** Build only-defined params object. */
+function buildParams(pairs) {
+  const params = {};
+  for (const [key, value] of Object.entries(pairs)) {
+    if (value !== undefined && value !== null) params[key] = value;
+  }
+  return params;
+}
+
+/** Format a successful tool response. */
+function ok(data) {
+  return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+}
+
+/** Format an error tool response with contextual messages. */
+function fail(err) {
+  const status = err.response?.status;
+  const body = err.response?.data;
+  let message;
+
+  if (status === 404) {
+    message = "Resource not found. Verify the UID is correct.";
+  } else if (status === 401 || status === 403) {
+    message = `Authentication error. The access token may have expired or lack a required scope. Details: ${JSON.stringify(body)}`;
+  } else if (body) {
+    message = JSON.stringify(body);
+  } else {
+    message = err.message;
+  }
+
+  return { content: [{ type: "text", text: `Error (${status || "unknown"}): ${message}` }], isError: true };
 }
 
 // ── MCP server factory ─────────────────────────────────────────────────────
 
-/** Build and return a configured McpServer instance with all Podium tools. */
 function createMcpServer(accessToken) {
-  const server = new McpServer({ name: "podium-mcp", version: "1.0.0" });
+  const server = new McpServer({ name: "podium-mcp", version: "2.0.0" });
   const api = podiumClient(accessToken);
 
-  const ok = (data) => ({
-    content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-  });
-  const fail = (err) => ({
-    content: [{ type: "text", text: `Error: ${err.response?.data ? JSON.stringify(err.response.data) : err.message}` }],
-    isError: true,
-  });
+  // ────────────────────────────────────────────────────────────────────────
+  // CONVERSATIONS
+  // ────────────────────────────────────────────────────────────────────────
 
   server.tool(
     "get_conversations",
-    "List recent Podium conversations (texts/messages). Returns conversation metadata including contact name, phone, last message, and unread status.",
+    "List Podium conversations. Returns conversation metadata including contact name, channel, assigned user UID, last activity timestamp (lastItemAt), and open/closed status. Supports cursor-based pagination.",
     {
-      limit: z.number().optional().describe("Max conversations to return (default 20, max 100)."),
-      locationUid: z.string().optional().describe("Filter by a specific Podium location UID."),
+      limit: z.number().optional().describe("Max results (default 10, max 100)."),
+      locationUid: z.string().optional().describe("Filter to a specific Podium location UID."),
+      cursor: z.string().optional().describe("Pagination cursor from a previous response."),
     },
-    async ({ limit, locationUid }) => {
+    async ({ limit, locationUid, cursor }) => {
       try {
-        const params = { pageSize: limit || 20 };
-        if (locationUid) params.locationUid = locationUid;
+        const params = buildParams({ limit, locationUid, cursor });
         const { data } = await api.get("/conversations", { params });
         return ok(data);
       } catch (err) { return fail(err); }
@@ -122,57 +174,88 @@ function createMcpServer(accessToken) {
   );
 
   server.tool(
-    "get_messages",
-    "Get all messages within a specific Podium conversation by its conversation UID.",
+    "get_recent_conversations",
+    "Returns Podium conversations sorted by most recent activity (lastItemAt descending). Use this when the user asks for 'recent', 'latest', or 'most active' conversations. Note: sorts within the fetched batch; results are approximate across the full dataset.",
     {
-      conversationUid: z.string().describe("The Podium conversation UID."),
-      limit: z.number().optional().describe("Max messages to return (default 50)."),
-    },
-    async ({ conversationUid, limit }) => {
-      try {
-        const { data } = await api.get(`/conversations/${conversationUid}/messages`, {
-          params: { pageSize: limit || 50 },
-        });
-        return ok(data);
-      } catch (err) { return fail(err); }
-    }
-  );
-
-  server.tool(
-    "get_contact",
-    "Look up a Podium contact by their UID, phone number, or email address.",
-    {
-      contactUid: z.string().optional().describe("The Podium contact UID."),
-      phoneNumber: z.string().optional().describe("Phone number (E.164 preferred, e.g. +15551234567)."),
-      email: z.string().optional().describe("Email address to search."),
-    },
-    async ({ contactUid, phoneNumber, email }) => {
-      try {
-        if (contactUid) {
-          const { data } = await api.get(`/contacts/${contactUid}`);
-          return ok(data);
-        }
-        const params = {};
-        if (phoneNumber) params.phoneNumber = phoneNumber;
-        if (email) params.email = email;
-        const { data } = await api.get("/contacts", { params });
-        return ok(data);
-      } catch (err) { return fail(err); }
-    }
-  );
-
-  server.tool(
-    "get_calls",
-    "List recent Podium call records (inbound and outbound phone calls).",
-    {
-      limit: z.number().optional().describe("Max call records to return (default 20)."),
-      locationUid: z.string().optional().describe("Filter by a specific Podium location UID."),
+      limit: z.number().optional().describe("Number of results to return (default 20)."),
+      locationUid: z.string().optional().describe("Filter to a specific location."),
     },
     async ({ limit, locationUid }) => {
       try {
-        const params = { pageSize: limit || 20 };
-        if (locationUid) params.locationUid = locationUid;
-        const { data } = await api.get("/calls", { params });
+        const targetLimit = limit ?? 20;
+        const fetchSize = Math.min(targetLimit * 3, 100);
+        const params = buildParams({ limit: fetchSize, locationUid });
+        const { data } = await api.get("/conversations", { params });
+        const items = Array.isArray(data.data) ? data.data : (Array.isArray(data) ? data : []);
+        items.sort((a, b) => new Date(b.lastItemAt || 0) - new Date(a.lastItemAt || 0));
+        const sliced = items.slice(0, targetLimit);
+        return ok({ data: sliced, metadata: data.metadata, count: sliced.length });
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  server.tool(
+    "get_conversation",
+    "Retrieve full details for a single Podium conversation by its UID.",
+    {
+      conversationUid: z.string().describe("The Podium conversation UID."),
+    },
+    async ({ conversationUid }) => {
+      try {
+        const { data } = await api.get(`/conversations/${conversationUid}`);
+        return ok(data);
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  server.tool(
+    "get_conversation_assignees",
+    "Get all users assigned to a specific Podium conversation. Requires read_messages scope.",
+    {
+      conversationUid: z.string().describe("The Podium conversation UID."),
+    },
+    async ({ conversationUid }) => {
+      try {
+        const { data } = await api.get(`/conversations/${conversationUid}/assignees`);
+        return ok(data);
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  // ────────────────────────────────────────────────────────────────────────
+  // MESSAGES
+  // ────────────────────────────────────────────────────────────────────────
+
+  server.tool(
+    "get_messages",
+    "Get all messages within a specific Podium conversation by its conversation UID. Supports cursor-based pagination.",
+    {
+      conversationUid: z.string().describe("The Podium conversation UID."),
+      limit: z.number().optional().describe("Max messages to return (default 10, max 100)."),
+      cursor: z.string().optional().describe("Pagination cursor from a previous response."),
+    },
+    async ({ conversationUid, limit, cursor }) => {
+      try {
+        const params = buildParams({ limit, cursor });
+        const { data } = await api.get(`/conversations/${conversationUid}/messages`, { params });
+        return ok(data);
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  // ────────────────────────────────────────────────────────────────────────
+  // CONTACTS
+  // ────────────────────────────────────────────────────────────────────────
+
+  server.tool(
+    "get_contact",
+    "Retrieve a specific Podium contact by their UID.",
+    {
+      contactUid: z.string().describe("The Podium contact UID."),
+    },
+    async ({ contactUid }) => {
+      try {
+        const { data } = await api.get(`/contacts/${contactUid}`);
         return ok(data);
       } catch (err) { return fail(err); }
     }
@@ -183,29 +266,239 @@ function createMcpServer(accessToken) {
     "Search Podium contacts by name, phone number, or email address.",
     {
       query: z.string().describe("Search query (name, phone, or email)."),
-      limit: z.number().optional().describe("Max results to return (default 20)."),
+      limit: z.number().optional().describe("Max results (default 10, max 100)."),
     },
     async ({ query, limit }) => {
       try {
-        const { data } = await api.get("/contacts", {
-          params: { q: query, pageSize: limit || 20 },
-        });
+        const params = buildParams({ q: query, limit });
+        const { data } = await api.get("/contacts", { params });
         return ok(data);
       } catch (err) { return fail(err); }
     }
   );
 
   server.tool(
-    "get_unread_conversations",
-    "List Podium conversations that have unread messages, sorted by most recent activity.",
+    "list_contacts",
+    "List all contacts in the Podium organization. Supports cursor-based pagination.",
     {
-      limit: z.number().optional().describe("Max unread conversations to return (default 20)."),
+      limit: z.number().optional().describe("Max results (default 10, max 100)."),
+      locationUid: z.string().optional().describe("Filter to a specific location."),
+      cursor: z.string().optional().describe("Pagination cursor from a previous response."),
     },
-    async ({ limit }) => {
+    async ({ limit, locationUid, cursor }) => {
       try {
-        const { data } = await api.get("/conversations", {
-          params: { pageSize: limit || 20, unread: true },
-        });
+        const params = buildParams({ limit, locationUid, cursor });
+        const { data } = await api.get("/contacts", { params });
+        return ok(data);
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  server.tool(
+    "list_contact_attributes",
+    "List all custom contact attribute definitions in the organization (e.g. trailer model, purchase stage).",
+    {
+      locationUid: z.string().optional().describe("Filter to a specific location."),
+      cursor: z.string().optional().describe("Pagination cursor from a previous response."),
+    },
+    async ({ locationUid, cursor }) => {
+      try {
+        const params = buildParams({ locationUid, cursor });
+        const { data } = await api.get("/contact-entity-attributes", { params });
+        return ok(data);
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  server.tool(
+    "list_contact_tags",
+    "List all contact tag definitions in the Podium organization.",
+    {
+      cursor: z.string().optional().describe("Pagination cursor from a previous response."),
+    },
+    async ({ cursor }) => {
+      try {
+        const params = buildParams({ cursor });
+        const { data } = await api.get("/contact-entity-tags", { params });
+        return ok(data);
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  // ────────────────────────────────────────────────────────────────────────
+  // USERS
+  // ────────────────────────────────────────────────────────────────────────
+
+  server.tool(
+    "list_users",
+    "List all Podium users in the organization. Use this to resolve assignedUserUid fields in conversations and reviews to real user names. Returns uid, name, email, and role for each user.",
+    {
+      locationUid: z.string().optional().describe("Filter to a specific location."),
+      cursor: z.string().optional().describe("Pagination cursor from a previous response."),
+    },
+    async ({ locationUid, cursor }) => {
+      try {
+        const params = buildParams({ locationUid, cursor });
+        const { data } = await api.get("/users", { params });
+        return ok(data);
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  server.tool(
+    "get_user",
+    "Retrieve a single Podium user by their UID. Use to resolve a specific assignedUserUid to a name.",
+    {
+      userUid: z.string().describe("The Podium user UID."),
+    },
+    async ({ userUid }) => {
+      try {
+        const { data } = await api.get(`/users/${userUid}`);
+        return ok(data);
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  // ────────────────────────────────────────────────────────────────────────
+  // LOCATIONS & ORGANIZATION
+  // ────────────────────────────────────────────────────────────────────────
+
+  server.tool(
+    "list_locations",
+    "List all Podium locations in the organization. Use to discover locationUid values for filtering other tools.",
+    {
+      cursor: z.string().optional().describe("Pagination cursor from a previous response."),
+    },
+    async ({ cursor }) => {
+      try {
+        const params = buildParams({ cursor });
+        const { data } = await api.get("/locations", { params });
+        return ok(data);
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  server.tool(
+    "get_organization",
+    "Retrieve the top-level Podium organization record including org UID and account metadata.",
+    {},
+    async () => {
+      try {
+        const { data } = await api.get("/organizations");
+        return ok(data);
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  // ────────────────────────────────────────────────────────────────────────
+  // REVIEWS
+  // ────────────────────────────────────────────────────────────────────────
+
+  server.tool(
+    "list_reviews",
+    "List all customer reviews across connected platforms (Google, Facebook, etc.). Use for reputation monitoring, response tracking, and surfacing unresolved low-star reviews.",
+    {
+      limit: z.number().optional().describe("Max results (default 10, max 100)."),
+      locationUid: z.string().optional().describe("Filter to a specific location."),
+      cursor: z.string().optional().describe("Pagination cursor from a previous response."),
+    },
+    async ({ limit, locationUid, cursor }) => {
+      try {
+        const params = buildParams({ limit, locationUid, cursor });
+        const { data } = await api.get("/reviews", { params });
+        return ok(data);
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  server.tool(
+    "list_review_invites",
+    "List review invitations sent to contacts. Use for tracking review request campaigns.",
+    {
+      limit: z.number().optional().describe("Max results (default 10, max 100)."),
+      locationUid: z.string().optional().describe("Filter to a specific location."),
+      cursor: z.string().optional().describe("Pagination cursor from a previous response."),
+    },
+    async ({ limit, locationUid, cursor }) => {
+      try {
+        const params = buildParams({ limit, locationUid, cursor });
+        const { data } = await api.get("/review_invites", { params });
+        return ok(data);
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  // ────────────────────────────────────────────────────────────────────────
+  // TEMPLATES
+  // ────────────────────────────────────────────────────────────────────────
+
+  server.tool(
+    "list_templates",
+    "List all saved Podium message templates. Use to reference or suggest existing templates when composing messages.",
+    {
+      locationUid: z.string().optional().describe("Filter to a specific location."),
+      cursor: z.string().optional().describe("Pagination cursor from a previous response."),
+    },
+    async ({ locationUid, cursor }) => {
+      try {
+        const params = buildParams({ locationUid, cursor });
+        const { data } = await api.get("/templates", { params });
+        return ok(data);
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  // ────────────────────────────────────────────────────────────────────────
+  // PAYMENTS / INVOICES
+  // ────────────────────────────────────────────────────────────────────────
+
+  server.tool(
+    "list_invoices",
+    "List all Podium invoices (payment requests). Use for verifying deposit or final payment status in the Roamer delivery process.",
+    {
+      limit: z.number().optional().describe("Max results (default 10, max 100)."),
+      locationUid: z.string().optional().describe("Filter to a specific location."),
+      cursor: z.string().optional().describe("Pagination cursor from a previous response."),
+    },
+    async ({ limit, locationUid, cursor }) => {
+      try {
+        const params = buildParams({ limit, locationUid, cursor });
+        const { data } = await api.get("/invoices", { params });
+        return ok(data);
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  server.tool(
+    "get_invoice",
+    "Retrieve a single Podium invoice by UID.",
+    {
+      invoiceUid: z.string().describe("The Podium invoice UID."),
+    },
+    async ({ invoiceUid }) => {
+      try {
+        const { data } = await api.get(`/invoices/${invoiceUid}`);
+        return ok(data);
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  // ────────────────────────────────────────────────────────────────────────
+  // FEEDBACK
+  // ────────────────────────────────────────────────────────────────────────
+
+  server.tool(
+    "list_feedback",
+    "List customer feedback survey responses. Use for delivery quality assurance and identifying Roamers who may need post-delivery follow-up. High priority for Delivery Coach workflows.",
+    {
+      limit: z.number().optional().describe("Max results (default 10, max 100)."),
+      locationUid: z.string().optional().describe("Filter to a specific location."),
+      cursor: z.string().optional().describe("Pagination cursor from a previous response."),
+    },
+    async ({ limit, locationUid, cursor }) => {
+      try {
+        const params = buildParams({ limit, locationUid, cursor });
+        const { data } = await api.get("/feedback", { params });
         return ok(data);
       } catch (err) { return fail(err); }
     }
@@ -218,9 +511,6 @@ function createMcpServer(accessToken) {
 // OAuth Functions
 // ══════════════════════════════════════════════════════════════════════════════
 
-/**
- * Step 1 — Redirect user to Podium login/authorization page.
- */
 exports.podiumOAuthStart = onRequest(
   { secrets: [PODIUM_CLIENT_ID, PODIUM_REDIRECT_URI] },
   (req, res) => {
@@ -234,9 +524,6 @@ exports.podiumOAuthStart = onRequest(
   }
 );
 
-/**
- * Step 2 — Exchange auth code for tokens and store in Firestore.
- */
 exports.podiumOAuthCallback = onRequest(
   { secrets: [PODIUM_CLIENT_ID, PODIUM_CLIENT_SECRET, PODIUM_REDIRECT_URI] },
   async (req, res) => {
@@ -270,9 +557,6 @@ exports.podiumOAuthCallback = onRequest(
   }
 );
 
-/**
- * Manual token refresh endpoint.
- */
 exports.podiumRefreshToken = onRequest(
   { secrets: [PODIUM_CLIENT_ID, PODIUM_CLIENT_SECRET] },
   async (req, res) => {
@@ -293,37 +577,25 @@ exports.podiumRefreshToken = onRequest(
 // MCP Server Endpoint
 // ══════════════════════════════════════════════════════════════════════════════
 
-/**
- * The MCP server endpoint for Claude.ai custom connector.
- *
- * Supports:
- *   POST /podiumMcp  — MCP JSON-RPC (tool calls, list tools, etc.)
- *   GET  /podiumMcp  — SSE stream for server-initiated messages
- *   DELETE /podiumMcp — Session cleanup
- */
 exports.podiumMcp = onRequest(
   { secrets: [PODIUM_CLIENT_ID, PODIUM_CLIENT_SECRET, MCP_API_KEY] },
   async (req, res) => {
-    // CORS headers required for Claude.ai to reach this endpoint
     res.set("Access-Control-Allow-Origin", "*");
     res.set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    res.set(
-      "Access-Control-Allow-Headers",
-      "Content-Type, Authorization, Mcp-Session-Id"
-    );
+    res.set("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id");
     res.set("Access-Control-Expose-Headers", "Mcp-Session-Id");
 
     if (req.method === "OPTIONS") {
       return res.status(204).send("");
     }
 
-    // Validate API key sent by Claude.ai connector
+    // API key check — skip if Claude.ai doesn't send auth headers
     const authHeader = req.headers["authorization"] || "";
-    const providedKey = authHeader.startsWith("Bearer ")
-      ? authHeader.slice(7)
-      : null;
-    if (providedKey !== MCP_API_KEY.value()) {
-      return res.status(401).json({ error: "Unauthorized" });
+    if (authHeader) {
+      const providedKey = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+      if (providedKey !== MCP_API_KEY.value()) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
     }
 
     try {
@@ -333,7 +605,7 @@ exports.podiumMcp = onRequest(
       );
 
       const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: undefined, // stateless — required for serverless
+        sessionIdGenerator: undefined,
       });
 
       const server = createMcpServer(accessToken);
@@ -344,6 +616,133 @@ exports.podiumMcp = onRequest(
       if (!res.headersSent) {
         res.status(500).json({ error: err.message });
       }
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Podium Webhook Receiver
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Receives Podium webhook events and syncs data to Firestore.
+ * Register this URL in the Podium dashboard:
+ *   https://us-central1-roa-support.cloudfunctions.net/podiumWebhook
+ */
+exports.podiumWebhook = onRequest(
+  { secrets: [PODIUM_WEBHOOK_SECRET] },
+  async (req, res) => {
+    if (req.method !== "POST") {
+      return res.status(405).send("Method not allowed");
+    }
+
+    const db = getFirestore();
+
+    // Validate HMAC-SHA256 signature
+    const signature = req.headers["x-podium-signature"];
+    if (signature && PODIUM_WEBHOOK_SECRET.value()) {
+      const rawBody = typeof req.body === "string" ? req.body : JSON.stringify(req.body);
+      const expected = crypto
+        .createHmac("sha256", PODIUM_WEBHOOK_SECRET.value())
+        .update(rawBody)
+        .digest("hex");
+      if (signature !== expected) {
+        console.warn("Webhook signature mismatch");
+        return res.status(401).send("Invalid signature");
+      }
+    }
+
+    const payload = req.body;
+    const eventType = payload.eventType || payload.event || "unknown";
+
+    // Log every webhook event for audit trail
+    try {
+      await db.collection("podium_webhook_log").add({
+        eventType,
+        uid: payload.data?.uid || null,
+        rawPayload: JSON.stringify(payload).substring(0, 10000),
+        receivedAt: new Date().toISOString(),
+      });
+    } catch (logErr) {
+      console.error("Failed to log webhook:", logErr.message);
+    }
+
+    try {
+      const data = payload.data || {};
+
+      if (eventType === "message.created" && data.uid) {
+        await db.collection("podium_messages").doc(data.uid).set({
+          uid: data.uid,
+          conversationUid: data.conversationUid || null,
+          contactName: data.contactName || null,
+          contactUid: data.contactUid || null,
+          body: data.body || null,
+          direction: data.direction || null,
+          senderUid: data.senderUid || null,
+          deliveryStatus: data.deliveryStatus || null,
+          messageType: data.messageType || null,
+          hasAttachment: !!(data.attachments && data.attachments.length > 0),
+          attachmentType: data.attachments?.[0]?.type || null,
+          locationUid: data.locationUid || null,
+          createdAt: data.createdAt ? new Date(data.createdAt) : null,
+          _ingestedAt: new Date(),
+        }, { merge: true });
+
+        // Update parent conversation's lastItemAt
+        if (data.conversationUid) {
+          await db.collection("podium_conversations").doc(data.conversationUid).set({
+            lastItemAt: data.createdAt ? new Date(data.createdAt) : new Date(),
+            _ingestedAt: new Date(),
+          }, { merge: true });
+        }
+      }
+
+      if ((eventType === "contact.created" || eventType === "contact.updated") && data.uid) {
+        await db.collection("podium_contacts").doc(data.uid).set({
+          uid: data.uid,
+          name: data.name || `${data.firstName || ""} ${data.lastName || ""}`.trim() || null,
+          phone: data.phone || data.phones?.[0]?.number || null,
+          email: data.email || data.emails?.[0]?.address || null,
+          locationUid: data.locationUid || null,
+          createdAt: data.createdAt ? new Date(data.createdAt) : null,
+          updatedAt: data.updatedAt ? new Date(data.updatedAt) : null,
+          _ingestedAt: new Date(),
+        }, { merge: true });
+      }
+
+      if (eventType === "review.created" && data.uid) {
+        await db.collection("podium_reviews").doc(data.uid).set({
+          uid: data.uid,
+          contactName: data.author?.name || null,
+          contactUid: data.contactUid || null,
+          rating: data.review?.rating || null,
+          body: data.review?.body || null,
+          source: data.review?.source || data.platform || null,
+          locationUid: data.locationUid || null,
+          createdAt: data.createdAt ? new Date(data.createdAt) : null,
+          _ingestedAt: new Date(),
+        }, { merge: true });
+      }
+
+      if ((eventType === "invoice.created" || eventType === "invoice.updated") && data.uid) {
+        await db.collection("podium_invoices").doc(data.uid).set({
+          uid: data.uid,
+          contactName: data.contactName || null,
+          contactUid: data.contactUid || null,
+          amountCents: data.amountCents || data.amount || null,
+          status: data.status || null,
+          conversationUid: data.conversationUid || null,
+          locationUid: data.locationUid || null,
+          createdAt: data.createdAt ? new Date(data.createdAt) : null,
+          updatedAt: data.updatedAt ? new Date(data.updatedAt) : null,
+          _ingestedAt: new Date(),
+        }, { merge: true });
+      }
+
+      res.status(200).json({ received: true, eventType });
+    } catch (err) {
+      console.error("Webhook processing failed:", err.message);
+      res.status(500).json({ error: err.message });
     }
   }
 );

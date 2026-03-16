@@ -1,0 +1,64 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "podium_conversations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "lastItemAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "podium_conversations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "assignedUserUid", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "lastItemAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "podium_conversations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "assignedUserUid", "order": "ASCENDING" },
+        { "fieldPath": "lastItemAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "podium_conversations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "assignedUserUid", "order": "ASCENDING" },
+        { "fieldPath": "lastItemAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "podium_messages",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "conversationUid", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "podium_messages",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "senderUid", "order": "ASCENDING" },
+        { "fieldPath": "direction", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "podium_messages",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "direction", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

@@ -1,0 +1,17 @@
+{
+  "name": "roa-podium-backfill",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "backfill": "node backfill.js",
+    "backfill:dry": "node backfill.js --dry-run",
+    "backfill:conversations": "node backfill.js --conversations-only",
+    "backfill:resume": "node backfill.js --resume",
+    "seed-users": "node seed-users.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.5",
+    "firebase-admin": "^13.6.0"
+  }
+}
