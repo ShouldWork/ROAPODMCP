@@ -1,9 +1,8 @@
 import { initializeApp } from "firebase/app";
-import { getFirestore } from "firebase/firestore";
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager } from "firebase/firestore";
 import { getAuth } from "firebase/auth";
 
 const firebaseConfig = {
-  // Replace with your Firebase project config from Firebase Console → Project Settings
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
   authDomain: "roa-support.firebaseapp.com",
   projectId: "roa-support",
@@ -12,5 +11,10 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app);
+
+// Enable persistent IndexedDB cache — survives page refreshes and works offline
+export const db = initializeFirestore(app, {
+  localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+});
+
 export const auth = getAuth(app);

@@ -28,7 +28,9 @@ service cloud.firestore {
     }
     match /podium_users/{doc} {
       allow read: if request.auth != null;
-      allow write: if false;
+      allow update: if request.auth != null
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['dashboardRole']);
+      allow create, delete: if false;
     }
     match /podium_webhook_log/{doc} {
       allow read, write: if false;

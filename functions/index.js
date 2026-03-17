@@ -149,8 +149,470 @@ function fail(err) {
 // ── MCP server factory ─────────────────────────────────────────────────────
 
 function createMcpServer(accessToken) {
-  const server = new McpServer({ name: "podium-mcp", version: "2.0.0" });
+  const server = new McpServer({
+    name: "podium-mcp",
+    version: "3.0.0",
+  });
   const api = podiumClient(accessToken);
+  const db = getFirestore();
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // FIRESTORE TOOLS — PRIMARY DATA SOURCE
+  // These query the local Firestore database (20k+ conversations indexed).
+  // ALWAYS use these tools first. They support sorting, filtering by status,
+  // coach, date range, and contact name — none of which the Podium API can do.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  server.tool(
+    "fs_dashboard_stats",
+    "Get dashboard summary statistics from Firestore: total conversations, open, closed, assignment rate, and conversation counts by dashboard role. This is the fastest way to get an overview of the inbox. ALWAYS use this first when asked about stats, counts, or overview.",
+    {},
+    async () => {
+      try {
+        const convRef = db.collection("podium_conversations");
+        const [totalSnap, openSnap, closedSnap] = await Promise.all([
+          convRef.count().get(),
+          convRef.where("status", "==", "open").count().get(),
+          convRef.where("status", "==", "closed").count().get(),
+        ]);
+        const total = totalSnap.data().count;
+        const open = openSnap.data().count;
+        const closed = closedSnap.data().count;
+
+        // Coach assignment breakdown for open conversations
+        const openConvSnap = await convRef.where("status", "==", "open").get();
+        const userSnap = await db.collection("podium_users").get();
+        const userMap = {};
+        userSnap.forEach((d) => { const u = d.data(); userMap[d.id] = { name: u.name, role: u.dashboardRole }; });
+
+        const byCoach = {};
+        let unassigned = 0;
+        openConvSnap.forEach((d) => {
+          const uid = d.data().assignedUserUid;
+          if (!uid) { unassigned++; return; }
+          const user = userMap[uid] || { name: uid.substring(0, 8), role: "Unknown" };
+          const key = user.name;
+          if (!byCoach[key]) byCoach[key] = { name: user.name, role: user.role || "Unset", count: 0 };
+          byCoach[key].count++;
+        });
+
+        return ok({
+          total, open, closed, unassigned,
+          assignmentRate: open > 0 ? Math.round(((open - unassigned) / open) * 100) : 0,
+          openByCoach: Object.values(byCoach).sort((a, b) => b.count - a.count),
+        });
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  server.tool(
+    "fs_conversations",
+    "Query conversations from Firestore with full filtering and sorting. Supports filtering by status (open/closed), assigned coach, contact name search, and date ranges. Results are sorted by lastItemAt descending (most recent first). ALWAYS use this instead of get_conversations unless explicitly asked for live Podium API data.",
+    {
+      status: z.enum(["open", "closed"]).optional().describe("Filter by conversation status. Omit for all."),
+      assignedUserUid: z.string().optional().describe("Filter by assigned user UID."),
+      assignedName: z.string().optional().describe("Filter by assigned user name (partial match, case-insensitive). Resolves to UID automatically."),
+      contactName: z.string().optional().describe("Search by contact name (partial match, case-insensitive). Filters client-side."),
+      phone: z.string().optional().describe("Search by phone number (partial match)."),
+      email: z.string().optional().describe("Search by email address (partial match, case-insensitive)."),
+      staleAfterDays: z.number().optional().describe("Only return conversations with no activity for this many days."),
+      activeWithinDays: z.number().optional().describe("Only return conversations with activity within this many days."),
+      limit: z.number().optional().describe("Max results to return (default 50, max 500)."),
+    },
+    async ({ status, assignedUserUid, assignedName, contactName, phone, email, staleAfterDays, activeWithinDays, limit: maxResults }) => {
+      try {
+        const cap = Math.min(maxResults || 50, 500);
+
+        // Resolve assignedName to UID if provided
+        let resolvedUid = assignedUserUid;
+        if (assignedName && !resolvedUid) {
+          const userSnap = await db.collection("podium_users").get();
+          const lowerName = assignedName.toLowerCase();
+          userSnap.forEach((d) => {
+            if ((d.data().name || "").toLowerCase().includes(lowerName)) {
+              resolvedUid = d.id;
+            }
+          });
+        }
+
+        // Build Firestore query
+        let q = db.collection("podium_conversations").orderBy("lastItemAt", "desc");
+        if (status) q = q.where("status", "==", status);
+        if (resolvedUid) q = q.where("assignedUserUid", "==", resolvedUid);
+
+        // Date filters
+        if (staleAfterDays) {
+          const cutoff = new Date(Date.now() - staleAfterDays * 86400000);
+          q = q.where("lastItemAt", "<", cutoff);
+        }
+        if (activeWithinDays) {
+          const cutoff = new Date(Date.now() - activeWithinDays * 86400000);
+          q = q.where("lastItemAt", ">", cutoff);
+        }
+
+        // Fetch more than needed if we're filtering client-side
+        const fetchLimit = (contactName || phone || email) ? Math.min(cap * 5, 2000) : cap;
+        q = q.limit(fetchLimit);
+
+        const snap = await q.get();
+        let results = snap.docs.map((d) => ({ uid: d.id, ...d.data() }));
+
+        // Client-side name/phone search
+        if (contactName) {
+          const lower = contactName.toLowerCase();
+          results = results.filter((c) => (c.contactName || "").toLowerCase().includes(lower));
+        }
+        if (phone) {
+          results = results.filter((c) => (c.phone || "").includes(phone));
+        }
+        if (email) {
+          const lowerEmail = email.toLowerCase();
+          results = results.filter((c) => (c.contactEmail || "").toLowerCase().includes(lowerEmail));
+        }
+
+        results = results.slice(0, cap);
+
+        // Resolve user names
+        const userSnap = await db.collection("podium_users").get();
+        const userMap = {};
+        userSnap.forEach((d) => { userMap[d.id] = d.data().name; });
+
+        results = results.map((c) => ({
+          ...c,
+          assignedUserName: userMap[c.assignedUserUid] || "Unassigned",
+          lastItemAt: c.lastItemAt?.toDate?.()?.toISOString() || c.lastItemAt,
+          createdAt: c.createdAt?.toDate?.()?.toISOString() || c.createdAt,
+        }));
+
+        return ok({ data: results, count: results.length });
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  server.tool(
+    "fs_messages",
+    "Get all messages for a conversation from Firestore, sorted by createdAt ascending (oldest first). Much faster than the Podium API. ALWAYS use this instead of get_messages unless explicitly asked for live API data.",
+    {
+      conversationUid: z.string().describe("The conversation UID."),
+      limit: z.number().optional().describe("Max messages to return (default 200)."),
+      direction: z.enum(["inbound", "outbound"]).optional().describe("Filter by message direction."),
+    },
+    async ({ conversationUid, limit: maxResults, direction }) => {
+      try {
+        let q = db.collection("podium_messages")
+          .where("conversationUid", "==", conversationUid)
+          .orderBy("createdAt", "asc");
+        if (direction) q = q.where("direction", "==", direction);
+        q = q.limit(maxResults || 200);
+
+        const snap = await q.get();
+        const userSnap = await db.collection("podium_users").get();
+        const userMap = {};
+        userSnap.forEach((d) => { userMap[d.id] = d.data().name; });
+
+        const messages = snap.docs.map((d) => {
+          const m = d.data();
+          return {
+            ...m,
+            senderName: userMap[m.senderUid] || (m.direction === "inbound" ? m.contactName : "System"),
+            createdAt: m.createdAt?.toDate?.()?.toISOString() || m.createdAt,
+          };
+        });
+
+        return ok({ data: messages, count: messages.length });
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  server.tool(
+    "fs_search_contacts",
+    "Search contacts and conversations in Firestore by name, phone, or email. Searches both podium_contacts and podium_conversations collections. Returns deduplicated results.",
+    {
+      query: z.string().describe("Search term — name, phone number, or email."),
+      limit: z.number().optional().describe("Max results (default 20)."),
+    },
+    async ({ query: searchTerm, limit: maxResults }) => {
+      try {
+        const cap = maxResults || 20;
+        const lower = searchTerm.toLowerCase();
+        const results = [];
+        const seen = new Set();
+
+        // Search conversations
+        const convSnap = await db.collection("podium_conversations")
+          .orderBy("lastItemAt", "desc")
+          .limit(2000)
+          .get();
+        convSnap.forEach((d) => {
+          const c = d.data();
+          const name = (c.contactName || "").toLowerCase();
+          const ph = c.phone || "";
+          const em = (c.contactEmail || "").toLowerCase();
+          if (name.includes(lower) || ph.includes(searchTerm) || em.includes(lower)) {
+            const key = (c.contactName || "") + ph;
+            if (!seen.has(key)) {
+              seen.add(key);
+              results.push({
+                source: "conversation",
+                uid: d.id,
+                contactName: c.contactName,
+                phone: c.phone,
+                email: c.contactEmail || null,
+                contactUid: c.contactUid || null,
+                status: c.status,
+                lastItemAt: c.lastItemAt?.toDate?.()?.toISOString() || c.lastItemAt,
+                assignedUserUid: c.assignedUserUid,
+              });
+            }
+          }
+        });
+
+        // Search contacts collection
+        const contactSnap = await db.collection("podium_contacts").limit(1000).get();
+        contactSnap.forEach((d) => {
+          const c = d.data();
+          const name = (c.name || "").toLowerCase();
+          const ph = c.phone || "";
+          const em = (c.email || "").toLowerCase();
+          if (name.includes(lower) || ph.includes(searchTerm) || em.includes(lower)) {
+            const key = (c.name || "") + ph;
+            if (!seen.has(key)) {
+              seen.add(key);
+              results.push({
+                source: "contact",
+                uid: d.id,
+                contactName: c.name,
+                phone: c.phone,
+                email: c.email,
+              });
+            }
+          }
+        });
+
+        return ok({ data: results.slice(0, cap), count: Math.min(results.length, cap) });
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  server.tool(
+    "fs_users",
+    "List all Podium users from Firestore with their names, roles, and dashboard roles. Use to resolve assignedUserUid to a name, or to see team composition.",
+    {},
+    async () => {
+      try {
+        const snap = await db.collection("podium_users").get();
+        const users = snap.docs.map((d) => {
+          const u = d.data();
+          return {
+            uid: d.id,
+            name: u.name,
+            email: u.email,
+            phone: u.phone,
+            podiumRole: u.role,
+            dashboardRole: u.dashboardRole || "Unset",
+            locations: u.locations || [],
+            active: u.active !== false,
+          };
+        }).sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+        return ok({ data: users, count: users.length });
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  server.tool(
+    "fs_follow_up_priority",
+    "Get open conversations that need follow-up — where the most recent message is inbound (customer sent last) and no agent has replied. Sorted by longest wait first, grouped by assigned Sales Coach. Use this when asked about unanswered messages, follow-ups needed, or response times.",
+    {
+      limit: z.number().optional().describe("Max conversations to check (default 100)."),
+    },
+    async ({ limit: maxResults }) => {
+      try {
+        const cap = maxResults || 100;
+        const convSnap = await db.collection("podium_conversations")
+          .where("status", "==", "open")
+          .orderBy("lastItemAt", "desc")
+          .limit(cap)
+          .get();
+
+        const userSnap = await db.collection("podium_users").get();
+        const userMap = {};
+        userSnap.forEach((d) => { userMap[d.id] = d.data(); });
+
+        const needsFollowUp = [];
+        for (const doc of convSnap.docs) {
+          const conv = doc.data();
+          const msgSnap = await db.collection("podium_messages")
+            .where("conversationUid", "==", doc.id)
+            .orderBy("createdAt", "desc")
+            .limit(1)
+            .get();
+          if (msgSnap.empty) continue;
+          const lastMsg = msgSnap.docs[0].data();
+          if (lastMsg.direction === "inbound") {
+            const lastMsgTime = lastMsg.createdAt?.toDate?.() || new Date(lastMsg.createdAt);
+            const waitHours = (Date.now() - lastMsgTime.getTime()) / 3600000;
+            needsFollowUp.push({
+              uid: doc.id,
+              contactName: conv.contactName,
+              phone: conv.phone,
+              assignedUserName: userMap[conv.assignedUserUid]?.name || "Unassigned",
+              assignedUserRole: userMap[conv.assignedUserUid]?.dashboardRole || "Unset",
+              waitHours: Math.round(waitHours * 10) / 10,
+              waitFormatted: waitHours < 1 ? `${Math.round(waitHours * 60)}m` : waitHours < 24 ? `${Math.round(waitHours)}h` : `${Math.round(waitHours / 24)}d`,
+              lastInboundAt: lastMsgTime.toISOString(),
+            });
+          }
+        }
+
+        needsFollowUp.sort((a, b) => b.waitHours - a.waitHours);
+        return ok({ data: needsFollowUp, count: needsFollowUp.length });
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  server.tool(
+    "fs_coach_workload",
+    "Get workload breakdown per Sales Coach from Firestore: open conversations, active in last 7 days, stale 7-30 days, stale 30+ days, and unassigned count. Use when asked about team performance, workload balance, or stale conversations.",
+    {},
+    async () => {
+      try {
+        const convSnap = await db.collection("podium_conversations")
+          .where("status", "==", "open")
+          .get();
+
+        const userSnap = await db.collection("podium_users").get();
+        const userMap = {};
+        userSnap.forEach((d) => { userMap[d.id] = d.data(); });
+
+        const now = Date.now();
+        const d7 = now - 7 * 86400000;
+        const d30 = now - 30 * 86400000;
+
+        const coachData = {};
+        convSnap.forEach((doc) => {
+          const c = doc.data();
+          const uid = c.assignedUserUid || "unassigned";
+          const user = userMap[uid] || { name: uid === "unassigned" ? "Unassigned" : uid.substring(0, 8), dashboardRole: "Unset" };
+          if (!coachData[uid]) coachData[uid] = { name: user.name, role: user.dashboardRole || "Unset", open: 0, active7d: 0, stale7to30d: 0, stale30d: 0 };
+          coachData[uid].open++;
+          const lastMs = c.lastItemAt?.toDate?.()?.getTime() || 0;
+          if (lastMs > d7) coachData[uid].active7d++;
+          else if (lastMs > d30) coachData[uid].stale7to30d++;
+          else coachData[uid].stale30d++;
+        });
+
+        const data = Object.values(coachData).sort((a, b) => b.open - a.open);
+        return ok({ data, count: data.length });
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  server.tool(
+    "fs_campaign_search",
+    "Search outbound message bodies in Firestore for a keyword to analyze campaign reach and reply rates. Use when asked about campaign performance, broadcast results, or keyword analysis.",
+    {
+      keyword: z.string().describe("Keyword to search for in outbound message bodies."),
+      limit: z.number().optional().describe("Max outbound messages to scan (default 5000)."),
+    },
+    async ({ keyword, limit: maxScan }) => {
+      try {
+        const cap = maxScan || 5000;
+        const msgSnap = await db.collection("podium_messages")
+          .where("direction", "==", "outbound")
+          .orderBy("createdAt", "desc")
+          .limit(cap)
+          .get();
+
+        const kw = keyword.toLowerCase();
+        const matches = [];
+        const conversationUids = new Set();
+
+        msgSnap.forEach((d) => {
+          const msg = d.data();
+          if (msg.body && msg.body.toLowerCase().includes(kw)) {
+            matches.push({
+              uid: d.id,
+              body: msg.body.substring(0, 200),
+              conversationUid: msg.conversationUid,
+              createdAt: msg.createdAt?.toDate?.()?.toISOString() || msg.createdAt,
+            });
+            if (msg.conversationUid) conversationUids.add(msg.conversationUid);
+          }
+        });
+
+        // Check reply rate on a sample
+        let replyCount = 0;
+        const sampleUids = Array.from(conversationUids).slice(0, 30);
+        for (const uid of sampleUids) {
+          const replySnap = await db.collection("podium_messages")
+            .where("conversationUid", "==", uid)
+            .where("direction", "==", "inbound")
+            .limit(1)
+            .get();
+          if (!replySnap.empty) replyCount++;
+        }
+
+        const dates = matches.map((m) => new Date(m.createdAt).getTime()).filter((d) => d > 0);
+        return ok({
+          keyword,
+          totalMatches: matches.length,
+          conversationsReached: conversationUids.size,
+          replyRate: sampleUids.length > 0 ? Math.round((replyCount / sampleUids.length) * 100) : 0,
+          dateRange: dates.length > 0
+            ? { from: new Date(Math.min(...dates)).toISOString(), to: new Date(Math.max(...dates)).toISOString() }
+            : null,
+          sampleMessages: matches.slice(0, 10),
+        });
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  server.tool(
+    "fs_name_quality",
+    "Analyze contact name quality across all conversations in Firestore. Returns counts of unique names, duplicate first=last names (e.g. 'Tim Tim'), unknown/missing names, and phone-number-only entries. Use for data quality audits.",
+    {},
+    async () => {
+      try {
+        let duplicateNames = 0, uniqueNames = 0, unknownNames = 0, phoneOnly = 0;
+        const dupeExamples = [];
+        let lastDoc = null;
+
+        while (true) {
+          let q = db.collection("podium_conversations").orderBy("__name__").limit(5000);
+          if (lastDoc) q = q.startAfter(lastDoc);
+          const snap = await q.get();
+          if (snap.empty) break;
+          snap.forEach((d) => {
+            const name = (d.data().contactName || "").trim();
+            if (!name || name.toLowerCase() === "unknown") { unknownNames++; return; }
+            if (/^\+?\d[\d\s\-()]+$/.test(name)) { phoneOnly++; return; }
+            const parts = name.split(/\s+/);
+            if (parts.length >= 2 && parts[0].toLowerCase() === parts[parts.length - 1].toLowerCase()) {
+              duplicateNames++;
+              if (dupeExamples.length < 10) dupeExamples.push(name);
+            } else {
+              uniqueNames++;
+            }
+          });
+          lastDoc = snap.docs[snap.docs.length - 1];
+        }
+
+        return ok({
+          uniqueNames, duplicateNames, unknownNames, phoneOnly,
+          total: uniqueNames + duplicateNames + unknownNames + phoneOnly,
+          duplicateExamples: dupeExamples,
+        });
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // PODIUM API TOOLS — LIVE DATA (use only when explicitly requested)
+  // These call the Podium REST API directly. They are slower, have no
+  // sorting/filtering, and are rate-limited to 300 req/min.
+  // Only use these when the user explicitly asks for "live" or "API" data,
+  // or for write operations, or for data not yet in Firestore.
+  // ══════════════════════════════════════════════════════════════════════════
 
   // ────────────────────────────────────────────────────────────────────────
   // CONVERSATIONS
@@ -158,7 +620,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "get_conversations",
-    "List Podium conversations. Returns conversation metadata including contact name, channel, assigned user UID, last activity timestamp (lastItemAt), and open/closed status. Supports cursor-based pagination.",
+    "[LIVE API — use fs_conversations instead unless user explicitly asks for live Podium data] List conversations directly from Podium API. No sorting or filtering. Cursor-based pagination only.",
     {
       limit: z.number().optional().describe("Max results (default 10, max 100)."),
       locationUid: z.string().optional().describe("Filter to a specific Podium location UID."),
@@ -175,7 +637,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "get_recent_conversations",
-    "Returns Podium conversations sorted by most recent activity (lastItemAt descending). Use this when the user asks for 'recent', 'latest', or 'most active' conversations. Note: sorts within the fetched batch; results are approximate across the full dataset.",
+    "[LIVE API — use fs_conversations instead] Fetches from Podium API and sorts client-side. Approximate results only. fs_conversations is faster and exact.",
     {
       limit: z.number().optional().describe("Number of results to return (default 20)."),
       locationUid: z.string().optional().describe("Filter to a specific location."),
@@ -196,7 +658,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "get_conversation",
-    "Retrieve full details for a single Podium conversation by its UID.",
+    "[LIVE API] Retrieve full details for a single conversation directly from Podium API.",
     {
       conversationUid: z.string().describe("The Podium conversation UID."),
     },
@@ -210,7 +672,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "get_conversation_assignees",
-    "Get all users assigned to a specific Podium conversation. Requires read_messages scope.",
+    "[LIVE API] Get all users assigned to a specific conversation directly from Podium API.",
     {
       conversationUid: z.string().describe("The Podium conversation UID."),
     },
@@ -228,7 +690,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "get_messages",
-    "Get all messages within a specific Podium conversation by its conversation UID. Supports cursor-based pagination.",
+    "[LIVE API — use fs_messages instead unless user explicitly asks for live data] Get messages directly from Podium API. fs_messages is faster and supports direction filtering.",
     {
       conversationUid: z.string().describe("The Podium conversation UID."),
       limit: z.number().optional().describe("Max messages to return (default 10, max 100)."),
@@ -249,7 +711,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "get_contact",
-    "Retrieve a specific Podium contact by their UID.",
+    "[LIVE API — use fs_search_contacts instead for search] Retrieve a specific contact by UID directly from Podium API.",
     {
       contactUid: z.string().describe("The Podium contact UID."),
     },
@@ -263,7 +725,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "search_contacts",
-    "Search Podium contacts by name, phone number, or email address.",
+    "[LIVE API — use fs_search_contacts instead] Search contacts directly from Podium API.",
     {
       query: z.string().describe("Search query (name, phone, or email)."),
       limit: z.number().optional().describe("Max results (default 10, max 100)."),
@@ -279,7 +741,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "list_contacts",
-    "List all contacts in the Podium organization. Supports cursor-based pagination.",
+    "[LIVE API] List all contacts directly from Podium API with cursor pagination.",
     {
       limit: z.number().optional().describe("Max results (default 10, max 100)."),
       locationUid: z.string().optional().describe("Filter to a specific location."),
@@ -331,7 +793,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "list_users",
-    "List all Podium users in the organization. Use this to resolve assignedUserUid fields in conversations and reviews to real user names. Returns uid, name, email, and role for each user.",
+    "[LIVE API — use fs_users instead] List users directly from Podium API. fs_users includes dashboard roles.",
     {
       locationUid: z.string().optional().describe("Filter to a specific location."),
       cursor: z.string().optional().describe("Pagination cursor from a previous response."),
@@ -347,7 +809,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "get_user",
-    "Retrieve a single Podium user by their UID. Use to resolve a specific assignedUserUid to a name.",
+    "[LIVE API] Retrieve a single user by UID directly from Podium API.",
     {
       userUid: z.string().describe("The Podium user UID."),
     },
@@ -365,7 +827,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "list_locations",
-    "List all Podium locations in the organization. Use to discover locationUid values for filtering other tools.",
+    "[LIVE API] List all Podium locations directly from the API.",
     {
       cursor: z.string().optional().describe("Pagination cursor from a previous response."),
     },
@@ -380,7 +842,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "get_organization",
-    "Retrieve the top-level Podium organization record including org UID and account metadata.",
+    "[LIVE API] Retrieve the top-level Podium organization record from the API.",
     {},
     async () => {
       try {
@@ -396,7 +858,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "list_reviews",
-    "List all customer reviews across connected platforms (Google, Facebook, etc.). Use for reputation monitoring, response tracking, and surfacing unresolved low-star reviews.",
+    "[LIVE API] List customer reviews directly from Podium API (Google, Facebook, etc.).",
     {
       limit: z.number().optional().describe("Max results (default 10, max 100)."),
       locationUid: z.string().optional().describe("Filter to a specific location."),
@@ -413,7 +875,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "list_review_invites",
-    "List review invitations sent to contacts. Use for tracking review request campaigns.",
+    "[LIVE API] List review invitations directly from Podium API.",
     {
       limit: z.number().optional().describe("Max results (default 10, max 100)."),
       locationUid: z.string().optional().describe("Filter to a specific location."),
@@ -434,7 +896,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "list_templates",
-    "List all saved Podium message templates. Use to reference or suggest existing templates when composing messages.",
+    "[LIVE API] List saved Podium message templates directly from the API.",
     {
       locationUid: z.string().optional().describe("Filter to a specific location."),
       cursor: z.string().optional().describe("Pagination cursor from a previous response."),
@@ -454,7 +916,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "list_invoices",
-    "List all Podium invoices (payment requests). Use for verifying deposit or final payment status in the Roamer delivery process.",
+    "[LIVE API] List Podium invoices (payment requests) directly from the API.",
     {
       limit: z.number().optional().describe("Max results (default 10, max 100)."),
       locationUid: z.string().optional().describe("Filter to a specific location."),
@@ -471,7 +933,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "get_invoice",
-    "Retrieve a single Podium invoice by UID.",
+    "[LIVE API] Retrieve a single Podium invoice by UID directly from the API.",
     {
       invoiceUid: z.string().describe("The Podium invoice UID."),
     },
@@ -489,7 +951,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "list_feedback",
-    "List customer feedback survey responses. Use for delivery quality assurance and identifying Roamers who may need post-delivery follow-up. High priority for Delivery Coach workflows.",
+    "[LIVE API] List customer feedback survey responses directly from Podium API.",
     {
       limit: z.number().optional().describe("Max results (default 10, max 100)."),
       locationUid: z.string().optional().describe("Filter to a specific location."),
@@ -653,13 +1115,18 @@ exports.podiumWebhook = onRequest(
     }
 
     const payload = req.body;
-    const eventType = payload.eventType || payload.event || "unknown";
+    // Podium nests event type under metadata.eventType
+    const eventType = payload.metadata?.eventType || payload.eventType || payload.event || "unknown";
+    const eventUid = payload.metadata?.eventUid || null;
+    // Podium sends before/after snapshots — use "after" as the current state
+    const data = payload.data?.after || payload.data || {};
 
     // Log every webhook event for audit trail
     try {
       await db.collection("podium_webhook_log").add({
         eventType,
-        uid: payload.data?.uid || null,
+        eventUid,
+        uid: data.uid || null,
         rawPayload: JSON.stringify(payload).substring(0, 10000),
         receivedAt: new Date().toISOString(),
       });
@@ -668,22 +1135,21 @@ exports.podiumWebhook = onRequest(
     }
 
     try {
-      const data = payload.data || {};
-
-      if (eventType === "message.created" && data.uid) {
+      // message.sent = outbound, message.received = inbound
+      if ((eventType === "message.sent" || eventType === "message.received") && data.uid) {
         await db.collection("podium_messages").doc(data.uid).set({
           uid: data.uid,
           conversationUid: data.conversationUid || null,
           contactName: data.contactName || null,
           contactUid: data.contactUid || null,
           body: data.body || null,
-          direction: data.direction || null,
+          direction: eventType === "message.received" ? "inbound" : "outbound",
           senderUid: data.senderUid || null,
           deliveryStatus: data.deliveryStatus || null,
           messageType: data.messageType || null,
           hasAttachment: !!(data.attachments && data.attachments.length > 0),
           attachmentType: data.attachments?.[0]?.type || null,
-          locationUid: data.locationUid || null,
+          locationUid: data.locationUid || data.organization?.uid || null,
           createdAt: data.createdAt ? new Date(data.createdAt) : null,
           _ingestedAt: new Date(),
         }, { merge: true });
@@ -700,10 +1166,10 @@ exports.podiumWebhook = onRequest(
       if ((eventType === "contact.created" || eventType === "contact.updated") && data.uid) {
         await db.collection("podium_contacts").doc(data.uid).set({
           uid: data.uid,
-          name: data.name || `${data.firstName || ""} ${data.lastName || ""}`.trim() || null,
-          phone: data.phone || data.phones?.[0]?.number || null,
-          email: data.email || data.emails?.[0]?.address || null,
-          locationUid: data.locationUid || null,
+          name: data.name || null,
+          phone: data.phoneNumbers?.[0] || null,
+          email: data.emails?.[0] || null,
+          locationUid: data.locations?.[0]?.uid || null,
           createdAt: data.createdAt ? new Date(data.createdAt) : null,
           updatedAt: data.updatedAt ? new Date(data.updatedAt) : null,
           _ingestedAt: new Date(),
@@ -715,8 +1181,8 @@ exports.podiumWebhook = onRequest(
           uid: data.uid,
           contactName: data.author?.name || null,
           contactUid: data.contactUid || null,
-          rating: data.review?.rating || null,
-          body: data.review?.body || null,
+          rating: data.review?.rating || data.rating || null,
+          body: data.review?.body || data.body || null,
           source: data.review?.source || data.platform || null,
           locationUid: data.locationUid || null,
           createdAt: data.createdAt ? new Date(data.createdAt) : null,
@@ -739,6 +1205,7 @@ exports.podiumWebhook = onRequest(
         }, { merge: true });
       }
 
+      console.log(`Webhook processed: ${eventType} (${data.uid || "no uid"})`);
       res.status(200).json({ received: true, eventType });
     } catch (err) {
       console.error("Webhook processing failed:", err.message);

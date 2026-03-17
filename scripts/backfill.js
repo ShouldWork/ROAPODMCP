@@ -197,7 +197,7 @@ async function fetchAllMessages(api, conversationUid) {
   let cursor = null;
 
   do {
-    const params = { limit: 100 };
+    const params = {};
     if (cursor) params.cursor = cursor;
 
     const { data } = await api.get(`/conversations/${conversationUid}/messages`, { params });
@@ -220,7 +220,7 @@ async function main() {
   const api = createApiClient(token);
 
   // Load resume state
-  let progress = FLAG_RESUME ? await loadProgress() : { lastCursor: null, conversationsDone: [], completed: false };
+  let progress = FLAG_RESUME ? await loadProgress() : { lastCursor: null, conversationsDoneCount: 0, completed: false };
   if (progress.completed && FLAG_RESUME) {
     log("Backfill already marked complete. Use without --resume to start fresh.");
     return;
@@ -228,16 +228,15 @@ async function main() {
 
   let cursor = FLAG_RESUME ? progress.lastCursor : null;
   let pageNum = 0;
-  let totalConversations = 0;
+  let totalConversations = progress.conversationsDoneCount || 0;
   let totalMessages = 0;
-  const doneSet = new Set(progress.conversationsDone || []);
 
-  log(cursor ? `Resuming from cursor (${doneSet.size} conversations already done)` : "Starting from the beginning");
+  log(cursor ? `Resuming from cursor (${totalConversations} conversations already done)` : "Starting from the beginning");
 
   // Page through all conversations
   do {
     pageNum++;
-    const params = { limit: 100 };
+    const params = {};
     if (cursor) params.cursor = cursor;
 
     log(`Fetching conversation page ${pageNum}...`);
@@ -259,9 +258,13 @@ async function main() {
     // Fetch and write messages for each conversation
     if (!FLAG_CONVERSATIONS_ONLY) {
       for (const conv of conversations) {
-        if (doneSet.has(conv.uid)) {
-          log(`  Skipping messages for ${conv.uid} (already done)`);
-          continue;
+        // Check if messages already backfilled for this conversation
+        if (!FLAG_DRY_RUN) {
+          const convDoc = await db.collection("podium_conversations").doc(conv.uid).get();
+          if (convDoc.exists && convDoc.data()._messagesBackfilled) {
+            log(`  Skipping messages for ${conv.contactName || conv.uid} (already done)`);
+            continue;
+          }
         }
 
         try {
@@ -270,23 +273,28 @@ async function main() {
             await writeMessagesBatch(messages, conv.uid);
             totalMessages += messages.length;
           }
+          // Mark this conversation as messages-backfilled
+          if (!FLAG_DRY_RUN) {
+            await db.collection("podium_conversations").doc(conv.uid).set(
+              { _messagesBackfilled: true }, { merge: true }
+            );
+          }
           log(`  ${conv.contactName || conv.uid}: ${messages.length} messages`);
-          doneSet.add(conv.uid);
         } catch (err) {
-          log(`  ERROR fetching messages for ${conv.uid}: ${err.message} — skipping`);
+          const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+          log(`  ERROR fetching messages for ${conv.uid}: ${detail} — skipping`);
         }
 
         await sleep(MESSAGE_FETCH_DELAY);
       }
-    } else {
-      for (const conv of conversations) doneSet.add(conv.uid);
     }
 
     // Save progress after each page
     cursor = nextCursor;
+    totalConversations += conversations.length;
     await saveProgress({
       lastCursor: cursor,
-      conversationsDone: Array.from(doneSet),
+      conversationsDoneCount: totalConversations,
       completed: false,
       lastPageAt: new Date().toISOString(),
     });
