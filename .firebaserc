@@ -1,5 +1,13 @@
 {
   "projects": {
     "default": "roa-support"
+  },
+  "targets": {
+    "roa-support": {
+      "hosting": {
+        "dashboard": ["roa-support"],
+        "delivery": ["roa-delivery"]
+      }
+    }
   }
 }
