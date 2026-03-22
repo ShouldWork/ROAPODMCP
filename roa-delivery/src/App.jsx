@@ -41,7 +41,7 @@ export default function App() {
           </div>
         </div>
         <div className="dl-nav-right">
-          <span className="dl-user-email">demo@roa-rv.com</span>
+          <span className="dl-user-email">mike@roa-rv.com</span>
           <button className="dl-nav-btn">Sign Out</button>
         </div>
       </nav>
