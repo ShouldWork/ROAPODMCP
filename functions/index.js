@@ -153,43 +153,7 @@ function fail(err) {
 
 // ── Contact Sync helpers ───────────────────────────────────────────────────
 
-async function fetchAllContactsForSync(accessToken, updatedAfter) {
-  const allContacts = [];
-  let cursor = null;
-  let page = 0;
-  const cutoff = new Date(updatedAfter).getTime();
-
-  do {
-    const params = { limit: 100 };
-    if (cursor) params.cursor = cursor;
-
-    const response = await axios.get(PODIUM_CONTACTS_URL, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      params,
-    });
-
-    const data = response.data;
-    if (Array.isArray(data.data)) {
-      allContacts.push(...data.data);
-    }
-    page++;
-    console.log(`Fetched page ${page}: ${data.data?.length || 0} contacts (${allContacts.length} total so far)`);
-
-    cursor = data.metadata?.nextCursor || null;
-  } while (cursor);
-
-  // Podium v4 /contacts doesn't support server-side date filtering,
-  // so we filter locally by updatedAt.
-  const filtered = allContacts.filter((c) => {
-    const ts = c.updatedAt ? new Date(c.updatedAt).getTime() : 0;
-    return ts >= cutoff;
-  });
-  console.log(`Filtered ${allContacts.length} total contacts down to ${filtered.length} updated after ${updatedAfter}`);
-  return filtered;
-}
+const CONTACT_SYNC_MAX_PAGES = 20; // 2000 contacts per invocation
 
 function extractContactFields(contact) {
   return {
@@ -207,79 +171,131 @@ function extractContactFields(contact) {
 async function runContactSync(accessToken, lookbackHours) {
   const db = getFirestore();
   const syncRunId = `sync_${Date.now()}`;
-  const stats = { created: 0, updated: 0, skipped: 0, errors: 0 };
+  const stats = { created: 0, updated: 0, skipped: 0, errors: 0, pagesProcessed: 0 };
   let changelogEntriesWritten = 0;
 
-  const updatedAfter = new Date(
+  const cutoff = new Date(
     Date.now() - lookbackHours * 60 * 60 * 1000
-  ).toISOString();
+  ).getTime();
+  const updatedAfterISO = new Date(cutoff).toISOString();
 
-  let contacts = [];
+  // Load saved cursor to resume pagination
+  const cursorDoc = await db.collection("podium_sync_state").doc("cursor").get();
+  let cursor = cursorDoc.exists ? cursorDoc.data().nextCursor || null : null;
+  console.log(`Starting sync from ${cursor ? "saved cursor" : "beginning"}`);
+
   let runError = null;
+  let totalFetched = 0;
+  let reachedEnd = false;
 
   try {
-    contacts = await fetchAllContactsForSync(accessToken, updatedAfter);
+    let page = 0;
 
-    for (const raw of contacts) {
-      try {
-        const contact = extractContactFields(raw);
+    while (page < CONTACT_SYNC_MAX_PAGES) {
+      const params = { limit: 100 };
+      if (cursor) params.cursor = cursor;
 
-        if (!contact.uid) {
-          stats.skipped++;
-          continue;
-        }
+      const response = await axios.get(PODIUM_CONTACTS_URL, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        params,
+      });
 
-        const docRef = db.collection("podium_contacts").doc(contact.uid);
-        const existing = await docRef.get();
+      const data = response.data;
+      const contacts = Array.isArray(data.data) ? data.data : [];
+      totalFetched += contacts.length;
+      page++;
+      console.log(`Page ${page}: ${contacts.length} contacts (${totalFetched} total this run)`);
 
-        if (!existing.exists) {
-          await docRef.set({
-            ...contact,
-            _syncedAt: FieldValue.serverTimestamp(),
-          });
-          stats.created++;
-        } else {
-          const existingData = existing.data();
-          const changedFields = [];
-          const previousValues = {};
-          const newValues = {};
+      for (const raw of contacts) {
+        try {
+          const contact = extractContactFields(raw);
 
-          for (const field of CONTACT_SYNC_TRACKED_FIELDS) {
-            const oldVal = existingData[field] ?? null;
-            const newVal = contact[field] ?? null;
-            if (oldVal !== newVal) {
-              changedFields.push(field);
-              previousValues[field] = oldVal;
-              newValues[field] = newVal;
-            }
+          if (!contact.uid) {
+            stats.skipped++;
+            continue;
           }
 
-          await docRef.set(
-            {
+          const contactUpdatedAt = contact.updatedAt
+            ? new Date(contact.updatedAt).getTime()
+            : 0;
+          if (contactUpdatedAt < cutoff) {
+            stats.skipped++;
+            continue;
+          }
+
+          const docRef = db.collection("podium_contacts").doc(contact.uid);
+          const existing = await docRef.get();
+
+          if (!existing.exists) {
+            await docRef.set({
               ...contact,
               _syncedAt: FieldValue.serverTimestamp(),
-            },
-            { merge: true }
-          );
-          stats.updated++;
-
-          if (changedFields.length > 0) {
-            await db.collection("podium_sync_changelog").add({
-              uid: contact.uid,
-              name: contact.name,
-              changedFields,
-              previousValues,
-              newValues,
-              appliedAt: new Date().toISOString(),
-              syncRunId,
             });
-            changelogEntriesWritten++;
+            stats.created++;
+          } else {
+            const existingData = existing.data();
+            const changedFields = [];
+            const previousValues = {};
+            const newValues = {};
+
+            for (const field of CONTACT_SYNC_TRACKED_FIELDS) {
+              const oldVal = existingData[field] ?? null;
+              const newVal = contact[field] ?? null;
+              if (oldVal !== newVal) {
+                changedFields.push(field);
+                previousValues[field] = oldVal;
+                newValues[field] = newVal;
+              }
+            }
+
+            await docRef.set(
+              { ...contact, _syncedAt: FieldValue.serverTimestamp() },
+              { merge: true }
+            );
+            stats.updated++;
+
+            if (changedFields.length > 0) {
+              await db.collection("podium_sync_changelog").add({
+                uid: contact.uid,
+                name: contact.name,
+                changedFields,
+                previousValues,
+                newValues,
+                appliedAt: new Date().toISOString(),
+                syncRunId,
+              });
+              changelogEntriesWritten++;
+            }
           }
+        } catch (contactErr) {
+          stats.errors++;
+          console.error(`Error processing contact ${raw.uid || "unknown"}:`, contactErr.message);
         }
-      } catch (contactErr) {
-        stats.errors++;
-        console.error(`Error processing contact ${raw.uid || "unknown"}:`, contactErr.message);
       }
+
+      stats.pagesProcessed = page;
+      cursor = data.metadata?.nextCursor || null;
+
+      if (!cursor) {
+        reachedEnd = true;
+        break;
+      }
+    }
+
+    // Persist or clear cursor for next invocation
+    if (reachedEnd) {
+      await db.collection("podium_sync_state").doc("cursor").delete();
+      console.log("Reached end of contacts list — cursor cleared.");
+    } else {
+      await db.collection("podium_sync_state").doc("cursor").set({
+        nextCursor: cursor,
+        savedAt: new Date().toISOString(),
+        syncRunId,
+      });
+      console.log(`Saved cursor for next run (processed ${page} pages, more remain).`);
     }
   } catch (err) {
     runError = err.message;
@@ -289,9 +305,10 @@ async function runContactSync(accessToken, lookbackHours) {
   await db.collection("podium_sync_log").add({
     syncRunId,
     success: runError === null,
-    updatedAfter,
+    updatedAfter: updatedAfterISO,
     lookbackHours,
-    contactsFetched: contacts.length,
+    contactsFetched: totalFetched,
+    reachedEnd,
     stats,
     changelogEntriesWritten,
     timestamp: FieldValue.serverTimestamp(),
@@ -302,7 +319,7 @@ async function runContactSync(accessToken, lookbackHours) {
     throw new Error(runError);
   }
 
-  return { stats, changelogEntriesWritten, syncRunId };
+  return { stats, changelogEntriesWritten, syncRunId, reachedEnd };
 }
 
 // ── MCP server factory ─────────────────────────────────────────────────────
@@ -1147,6 +1164,10 @@ function createMcpServer(accessToken) {
           stats: result.stats,
           changelogCount: result.changelogEntriesWritten,
           syncRunId: result.syncRunId,
+          reachedEnd: result.reachedEnd,
+          message: result.reachedEnd
+            ? "Full sync complete."
+            : "Partial sync — call again to continue from where this run left off.",
         });
       } catch (err) { return fail(err); }
     }

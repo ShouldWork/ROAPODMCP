@@ -16,13 +16,10 @@ const LOCATION_UID = "a79838e3-8d84-5dcf-9846-a7e6d0fbdd55";
 const PODIUM_CONTACTS_URL = "https://api.podium.com/v4/contacts";
 const PODIUM_TOKEN_URL = "https://api.podium.com/oauth/token";
 const TRACKED_FIELDS = ["name", "phone", "email"];
+const MAX_PAGES_PER_RUN = 20; // 2000 contacts per invocation
 
 // ── Token management ────────────────────────────────────────────────────────
 
-/**
- * Load the stored access token from Firestore, refreshing it automatically
- * if it has expired (or will expire within 5 minutes).
- */
 async function getAccessToken(clientId, clientSecret) {
   const db = getFirestore();
   const doc = await db.collection("podium_tokens").doc("primary").get();
@@ -39,7 +36,6 @@ async function getAccessToken(clientId, clientSecret) {
     return access_token;
   }
 
-  // Token expired — refresh it
   console.log("Token expired, refreshing...");
   let response;
   try {
@@ -71,48 +67,6 @@ async function getAccessToken(clientId, clientSecret) {
 // ── Podium API helpers ───────────────────────────────────────────────────────
 
 /**
- * Fetch all contacts updated after the given ISO timestamp, paginating
- * through all pages until no nextCursor is returned.
- */
-async function fetchAllContacts(accessToken, updatedAfter) {
-  const allContacts = [];
-  let cursor = null;
-  let page = 0;
-  const cutoff = new Date(updatedAfter).getTime();
-
-  do {
-    const params = { limit: 100 };
-    if (cursor) params.cursor = cursor;
-
-    const response = await axios.get(PODIUM_CONTACTS_URL, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      params,
-    });
-
-    const data = response.data;
-    if (Array.isArray(data.data)) {
-      allContacts.push(...data.data);
-    }
-    page++;
-    console.log(`Fetched page ${page}: ${data.data?.length || 0} contacts (${allContacts.length} total so far)`);
-
-    cursor = data.metadata?.nextCursor || null;
-  } while (cursor);
-
-  // Podium v4 /contacts doesn't support server-side date filtering,
-  // so we filter locally by updatedAt.
-  const filtered = allContacts.filter((c) => {
-    const ts = c.updatedAt ? new Date(c.updatedAt).getTime() : 0;
-    return ts >= cutoff;
-  });
-  console.log(`Filtered ${allContacts.length} total contacts down to ${filtered.length} updated after ${updatedAfter}`);
-  return filtered;
-}
-
-/**
  * Extract normalized fields from a Podium contact object.
  */
 function extractContactFields(contact) {
@@ -130,91 +84,149 @@ function extractContactFields(contact) {
 
 // ── Core sync logic ──────────────────────────────────────────────────────────
 
+/**
+ * Sync contacts from Podium, processing up to MAX_PAGES_PER_RUN pages per
+ * invocation. Persists the pagination cursor in Firestore so the next run
+ * resumes where this one left off.
+ *
+ * When the full contact list has been traversed (no more pages), the stored
+ * cursor is cleared so the next invocation starts from the beginning.
+ */
 async function syncContacts(accessToken, lookbackHours) {
   const db = getFirestore();
   const syncRunId = `sync_${Date.now()}`;
-  const stats = { created: 0, updated: 0, skipped: 0, errors: 0 };
+  const stats = { created: 0, updated: 0, skipped: 0, errors: 0, pagesProcessed: 0 };
   let changelogEntriesWritten = 0;
 
-  const updatedAfter = new Date(
+  const cutoff = new Date(
     Date.now() - lookbackHours * 60 * 60 * 1000
-  ).toISOString();
+  ).getTime();
+  const updatedAfterISO = new Date(cutoff).toISOString();
 
-  let contacts = [];
+  // Load saved cursor (if any) to resume pagination
+  const cursorDoc = await db.collection("podium_sync_state").doc("cursor").get();
+  let cursor = cursorDoc.exists ? cursorDoc.data().nextCursor || null : null;
+  const resumedFrom = cursor ? "saved cursor" : "beginning";
+  console.log(`Starting sync from ${resumedFrom}`);
+
   let runError = null;
+  let totalFetched = 0;
+  let reachedEnd = false;
 
   try {
-    contacts = await fetchAllContacts(accessToken, updatedAfter);
-    console.log(`Fetched ${contacts.length} contacts from Podium (updatedAfter: ${updatedAfter})`);
+    let page = 0;
 
-    for (const raw of contacts) {
-      try {
-        const contact = extractContactFields(raw);
+    while (page < MAX_PAGES_PER_RUN) {
+      const params = { limit: 100 };
+      if (cursor) params.cursor = cursor;
 
-        if (!contact.uid) {
-          stats.skipped++;
-          continue;
-        }
+      const response = await axios.get(PODIUM_CONTACTS_URL, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        params,
+      });
 
-        const docRef = db.collection("podium_contacts").doc(contact.uid);
-        const existing = await docRef.get();
+      const data = response.data;
+      const contacts = Array.isArray(data.data) ? data.data : [];
+      totalFetched += contacts.length;
+      page++;
+      console.log(`Page ${page}: ${contacts.length} contacts (${totalFetched} total this run)`);
 
-        if (!existing.exists) {
-          // ── New contact ──────────────────────────────────────────────
-          await docRef.set({
-            ...contact,
-            _syncedAt: FieldValue.serverTimestamp(),
-          });
-          stats.created++;
-          console.log(`Created contact: ${contact.name} (${contact.uid})`);
-        } else {
-          // ── Existing contact — check for field changes ───────────────
-          const existingData = existing.data();
-          const changedFields = [];
-          const previousValues = {};
-          const newValues = {};
+      // Process each contact in this page immediately
+      for (const raw of contacts) {
+        try {
+          const contact = extractContactFields(raw);
 
-          for (const field of TRACKED_FIELDS) {
-            const oldVal = existingData[field] ?? null;
-            const newVal = contact[field] ?? null;
-            if (oldVal !== newVal) {
-              changedFields.push(field);
-              previousValues[field] = oldVal;
-              newValues[field] = newVal;
-            }
+          if (!contact.uid) {
+            stats.skipped++;
+            continue;
           }
 
-          // Always write the contact with updated metadata
-          await docRef.set(
-            {
+          // Check if contact was updated within our lookback window
+          const contactUpdatedAt = contact.updatedAt
+            ? new Date(contact.updatedAt).getTime()
+            : 0;
+          if (contactUpdatedAt < cutoff) {
+            stats.skipped++;
+            continue;
+          }
+
+          const docRef = db.collection("podium_contacts").doc(contact.uid);
+          const existing = await docRef.get();
+
+          if (!existing.exists) {
+            await docRef.set({
               ...contact,
               _syncedAt: FieldValue.serverTimestamp(),
-            },
-            { merge: true }
-          );
-          stats.updated++;
-
-          if (changedFields.length > 0) {
-            // Write changelog entry
-            await db.collection("podium_sync_changelog").add({
-              uid: contact.uid,
-              name: contact.name,
-              changedFields,
-              previousValues,
-              newValues,
-              appliedAt: new Date().toISOString(),
-              syncRunId,
             });
-            changelogEntriesWritten++;
-            console.log(
-              `Updated contact with field changes: ${contact.name} (${contact.uid}) — fields: ${changedFields.join(", ")}`
+            stats.created++;
+            console.log(`Created contact: ${contact.name} (${contact.uid})`);
+          } else {
+            const existingData = existing.data();
+            const changedFields = [];
+            const previousValues = {};
+            const newValues = {};
+
+            for (const field of TRACKED_FIELDS) {
+              const oldVal = existingData[field] ?? null;
+              const newVal = contact[field] ?? null;
+              if (oldVal !== newVal) {
+                changedFields.push(field);
+                previousValues[field] = oldVal;
+                newValues[field] = newVal;
+              }
+            }
+
+            await docRef.set(
+              { ...contact, _syncedAt: FieldValue.serverTimestamp() },
+              { merge: true }
             );
+            stats.updated++;
+
+            if (changedFields.length > 0) {
+              await db.collection("podium_sync_changelog").add({
+                uid: contact.uid,
+                name: contact.name,
+                changedFields,
+                previousValues,
+                newValues,
+                appliedAt: new Date().toISOString(),
+                syncRunId,
+              });
+              changelogEntriesWritten++;
+              console.log(
+                `Updated contact with field changes: ${contact.name} (${contact.uid}) — fields: ${changedFields.join(", ")}`
+              );
+            }
           }
+        } catch (contactErr) {
+          stats.errors++;
+          console.error(`Error processing contact ${raw.uid || "unknown"}:`, contactErr.message);
         }
-      } catch (contactErr) {
-        stats.errors++;
-        console.error(`Error processing contact ${raw.uid || "unknown"}:`, contactErr.message);
       }
+
+      stats.pagesProcessed = page;
+      cursor = data.metadata?.nextCursor || null;
+
+      if (!cursor) {
+        reachedEnd = true;
+        break;
+      }
+    }
+
+    // Persist cursor for the next invocation (or clear it if we reached the end)
+    if (reachedEnd) {
+      await db.collection("podium_sync_state").doc("cursor").delete();
+      console.log("Reached end of contacts list — cursor cleared for next full pass.");
+    } else {
+      await db.collection("podium_sync_state").doc("cursor").set({
+        nextCursor: cursor,
+        savedAt: new Date().toISOString(),
+        syncRunId,
+      });
+      console.log(`Saved cursor for next run (processed ${page} pages, more remain).`);
     }
   } catch (err) {
     const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
@@ -222,13 +234,14 @@ async function syncContacts(accessToken, lookbackHours) {
     console.error("Sync run failed:", detail);
   }
 
-  // ── Write sync run log ───────────────────────────────────────────────────
+  // Write sync run log
   await db.collection("podium_sync_log").add({
     syncRunId,
     success: runError === null,
-    updatedAfter,
+    updatedAfter: updatedAfterISO,
     lookbackHours,
-    contactsFetched: contacts.length,
+    contactsFetched: totalFetched,
+    reachedEnd,
     stats,
     changelogEntriesWritten,
     timestamp: FieldValue.serverTimestamp(),
@@ -239,7 +252,7 @@ async function syncContacts(accessToken, lookbackHours) {
     throw new Error(runError);
   }
 
-  return { stats, changelogEntriesWritten, syncRunId };
+  return { stats, changelogEntriesWritten, syncRunId, reachedEnd };
 }
 
 // ── Exported Cloud Functions ─────────────────────────────────────────────────
@@ -286,6 +299,10 @@ exports.podiumContactSyncManual = onRequest(
         success: true,
         stats: result.stats,
         changelogCount: result.changelogEntriesWritten,
+        reachedEnd: result.reachedEnd,
+        message: result.reachedEnd
+          ? "Full sync complete."
+          : "Partial sync — call again to continue from where this run left off.",
       });
     } catch (err) {
       const detail = err.response?.data || err.message;
