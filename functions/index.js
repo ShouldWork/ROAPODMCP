@@ -156,6 +156,7 @@ function fail(err) {
 async function fetchAllContactsForSync(accessToken, updatedAfter) {
   const allContacts = [];
   let cursor = null;
+  let page = 0;
   const cutoff = new Date(updatedAfter).getTime();
 
   do {
@@ -174,16 +175,20 @@ async function fetchAllContactsForSync(accessToken, updatedAfter) {
     if (Array.isArray(data.data)) {
       allContacts.push(...data.data);
     }
+    page++;
+    console.log(`Fetched page ${page}: ${data.data?.length || 0} contacts (${allContacts.length} total so far)`);
 
     cursor = data.metadata?.nextCursor || null;
   } while (cursor);
 
   // Podium v4 /contacts doesn't support server-side date filtering,
   // so we filter locally by updatedAt.
-  return allContacts.filter((c) => {
+  const filtered = allContacts.filter((c) => {
     const ts = c.updatedAt ? new Date(c.updatedAt).getTime() : 0;
     return ts >= cutoff;
   });
+  console.log(`Filtered ${allContacts.length} total contacts down to ${filtered.length} updated after ${updatedAfter}`);
+  return filtered;
 }
 
 function extractContactFields(contact) {
