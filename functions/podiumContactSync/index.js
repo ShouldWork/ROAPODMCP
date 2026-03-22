@@ -16,7 +16,7 @@ const LOCATION_UID = "a79838e3-8d84-5dcf-9846-a7e6d0fbdd55";
 const PODIUM_CONTACTS_URL = "https://api.podium.com/v4/contacts";
 const PODIUM_TOKEN_URL = "https://api.podium.com/oauth/token";
 const TRACKED_FIELDS = ["name", "phone", "email"];
-const MAX_PAGES_PER_RUN = 20; // 2000 contacts per invocation
+const MAX_PAGES_PER_RUN = 5; // 500 contacts per invocation — keeps runtime well under 60s
 
 // ── Token management ────────────────────────────────────────────────────────
 
@@ -64,11 +64,8 @@ async function getAccessToken(clientId, clientSecret) {
   return tokens.access_token;
 }
 
-// ── Podium API helpers ───────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * Extract normalized fields from a Podium contact object.
- */
 function extractContactFields(contact) {
   return {
     uid: contact.uid || null,
@@ -84,14 +81,6 @@ function extractContactFields(contact) {
 
 // ── Core sync logic ──────────────────────────────────────────────────────────
 
-/**
- * Sync contacts from Podium, processing up to MAX_PAGES_PER_RUN pages per
- * invocation. Persists the pagination cursor in Firestore so the next run
- * resumes where this one left off.
- *
- * When the full contact list has been traversed (no more pages), the stored
- * cursor is cleared so the next invocation starts from the beginning.
- */
 async function syncContacts(accessToken, lookbackHours) {
   const db = getFirestore();
   const syncRunId = `sync_${Date.now()}`;
@@ -103,11 +92,10 @@ async function syncContacts(accessToken, lookbackHours) {
   ).getTime();
   const updatedAfterISO = new Date(cutoff).toISOString();
 
-  // Load saved cursor (if any) to resume pagination
+  // Load saved cursor to resume pagination
   const cursorDoc = await db.collection("podium_sync_state").doc("cursor").get();
   let cursor = cursorDoc.exists ? cursorDoc.data().nextCursor || null : null;
-  const resumedFrom = cursor ? "saved cursor" : "beginning";
-  console.log(`Starting sync from ${resumedFrom}`);
+  console.log(`Starting sync from ${cursor ? "saved cursor" : "beginning"}`);
 
   let runError = null;
   let totalFetched = 0;
@@ -134,7 +122,10 @@ async function syncContacts(accessToken, lookbackHours) {
       page++;
       console.log(`Page ${page}: ${contacts.length} contacts (${totalFetched} total this run)`);
 
-      // Process each contact in this page immediately
+      // Use Firestore batched writes (max 500 ops per batch) for speed
+      let batch = db.batch();
+      let opsInBatch = 0;
+
       for (const raw of contacts) {
         try {
           const contact = extractContactFields(raw);
@@ -144,7 +135,7 @@ async function syncContacts(accessToken, lookbackHours) {
             continue;
           }
 
-          // Check if contact was updated within our lookback window
+          // Skip contacts outside lookback window
           const contactUpdatedAt = contact.updatedAt
             ? new Date(contact.updatedAt).getTime()
             : 0;
@@ -157,12 +148,12 @@ async function syncContacts(accessToken, lookbackHours) {
           const existing = await docRef.get();
 
           if (!existing.exists) {
-            await docRef.set({
+            batch.set(docRef, {
               ...contact,
               _syncedAt: FieldValue.serverTimestamp(),
             });
+            opsInBatch++;
             stats.created++;
-            console.log(`Created contact: ${contact.name} (${contact.uid})`);
           } else {
             const existingData = existing.data();
             const changedFields = [];
@@ -179,14 +170,16 @@ async function syncContacts(accessToken, lookbackHours) {
               }
             }
 
-            await docRef.set(
-              { ...contact, _syncedAt: FieldValue.serverTimestamp() },
-              { merge: true }
-            );
+            batch.set(docRef, {
+              ...contact,
+              _syncedAt: FieldValue.serverTimestamp(),
+            }, { merge: true });
+            opsInBatch++;
             stats.updated++;
 
             if (changedFields.length > 0) {
-              await db.collection("podium_sync_changelog").add({
+              const changelogRef = db.collection("podium_sync_changelog").doc();
+              batch.set(changelogRef, {
                 uid: contact.uid,
                 name: contact.name,
                 changedFields,
@@ -195,16 +188,26 @@ async function syncContacts(accessToken, lookbackHours) {
                 appliedAt: new Date().toISOString(),
                 syncRunId,
               });
+              opsInBatch++;
               changelogEntriesWritten++;
-              console.log(
-                `Updated contact with field changes: ${contact.name} (${contact.uid}) — fields: ${changedFields.join(", ")}`
-              );
             }
+          }
+
+          // Firestore batch limit is 500 operations
+          if (opsInBatch >= 400) {
+            await batch.commit();
+            batch = db.batch();
+            opsInBatch = 0;
           }
         } catch (contactErr) {
           stats.errors++;
           console.error(`Error processing contact ${raw.uid || "unknown"}:`, contactErr.message);
         }
+      }
+
+      // Commit remaining operations in this page's batch
+      if (opsInBatch > 0) {
+        await batch.commit();
       }
 
       stats.pagesProcessed = page;
@@ -216,17 +219,17 @@ async function syncContacts(accessToken, lookbackHours) {
       }
     }
 
-    // Persist cursor for the next invocation (or clear it if we reached the end)
+    // Persist or clear cursor for next invocation
     if (reachedEnd) {
       await db.collection("podium_sync_state").doc("cursor").delete();
-      console.log("Reached end of contacts list — cursor cleared for next full pass.");
+      console.log("Reached end of contacts — cursor cleared.");
     } else {
       await db.collection("podium_sync_state").doc("cursor").set({
         nextCursor: cursor,
         savedAt: new Date().toISOString(),
         syncRunId,
       });
-      console.log(`Saved cursor for next run (processed ${page} pages, more remain).`);
+      console.log(`Saved cursor for next run (${page} pages done, more remain).`);
     }
   } catch (err) {
     const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
@@ -257,9 +260,6 @@ async function syncContacts(accessToken, lookbackHours) {
 
 // ── Exported Cloud Functions ─────────────────────────────────────────────────
 
-/**
- * Scheduled function — runs daily at 2:00 AM MT (8:00 AM UTC).
- */
 exports.podiumContactSyncScheduled = onSchedule(
   {
     schedule: "0 8 * * *",
@@ -275,9 +275,6 @@ exports.podiumContactSyncScheduled = onSchedule(
   }
 );
 
-/**
- * HTTP trigger — POST only. Accepts optional { lookbackHours } in body.
- */
 exports.podiumContactSyncManual = onRequest(
   {
     timeoutSeconds: 540,

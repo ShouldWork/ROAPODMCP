@@ -153,7 +153,7 @@ function fail(err) {
 
 // ── Contact Sync helpers ───────────────────────────────────────────────────
 
-const CONTACT_SYNC_MAX_PAGES = 20; // 2000 contacts per invocation
+const CONTACT_SYNC_MAX_PAGES = 5; // 500 contacts per invocation — keeps runtime under 60s
 
 function extractContactFields(contact) {
   return {
@@ -209,6 +209,10 @@ async function runContactSync(accessToken, lookbackHours) {
       page++;
       console.log(`Page ${page}: ${contacts.length} contacts (${totalFetched} total this run)`);
 
+      // Use Firestore batched writes for speed
+      let batch = db.batch();
+      let opsInBatch = 0;
+
       for (const raw of contacts) {
         try {
           const contact = extractContactFields(raw);
@@ -230,10 +234,11 @@ async function runContactSync(accessToken, lookbackHours) {
           const existing = await docRef.get();
 
           if (!existing.exists) {
-            await docRef.set({
+            batch.set(docRef, {
               ...contact,
               _syncedAt: FieldValue.serverTimestamp(),
             });
+            opsInBatch++;
             stats.created++;
           } else {
             const existingData = existing.data();
@@ -251,14 +256,16 @@ async function runContactSync(accessToken, lookbackHours) {
               }
             }
 
-            await docRef.set(
-              { ...contact, _syncedAt: FieldValue.serverTimestamp() },
-              { merge: true }
-            );
+            batch.set(docRef, {
+              ...contact,
+              _syncedAt: FieldValue.serverTimestamp(),
+            }, { merge: true });
+            opsInBatch++;
             stats.updated++;
 
             if (changedFields.length > 0) {
-              await db.collection("podium_sync_changelog").add({
+              const changelogRef = db.collection("podium_sync_changelog").doc();
+              batch.set(changelogRef, {
                 uid: contact.uid,
                 name: contact.name,
                 changedFields,
@@ -267,13 +274,24 @@ async function runContactSync(accessToken, lookbackHours) {
                 appliedAt: new Date().toISOString(),
                 syncRunId,
               });
+              opsInBatch++;
               changelogEntriesWritten++;
             }
+          }
+
+          if (opsInBatch >= 400) {
+            await batch.commit();
+            batch = db.batch();
+            opsInBatch = 0;
           }
         } catch (contactErr) {
           stats.errors++;
           console.error(`Error processing contact ${raw.uid || "unknown"}:`, contactErr.message);
         }
+      }
+
+      if (opsInBatch > 0) {
+        await batch.commit();
       }
 
       stats.pagesProcessed = page;
