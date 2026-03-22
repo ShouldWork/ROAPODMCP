@@ -40,16 +40,24 @@ async function getAccessToken(clientId, clientSecret) {
   }
 
   // Token expired — refresh it
-  const response = await axios.post(
-    PODIUM_TOKEN_URL,
-    new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token,
-      client_id: clientId,
-      client_secret: clientSecret,
-    }).toString(),
-    { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
-  );
+  console.log("Token expired, refreshing...");
+  let response;
+  try {
+    response = await axios.post(
+      PODIUM_TOKEN_URL,
+      new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token,
+        client_id: clientId,
+        client_secret: clientSecret,
+      }).toString(),
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+    );
+  } catch (refreshErr) {
+    const detail = refreshErr.response?.data || refreshErr.message;
+    console.error("Token refresh failed:", JSON.stringify(detail));
+    throw new Error(`Token refresh failed: ${JSON.stringify(detail)}`);
+  }
 
   const tokens = response.data;
   await db.collection("podium_tokens").doc("primary").set({
@@ -202,8 +210,9 @@ async function syncContacts(accessToken, lookbackHours) {
       }
     }
   } catch (err) {
-    runError = err.message;
-    console.error("Sync run failed:", err.message);
+    const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+    runError = detail;
+    console.error("Sync run failed:", detail);
   }
 
   // ── Write sync run log ───────────────────────────────────────────────────
@@ -268,10 +277,11 @@ exports.podiumContactSyncManual = onRequest(
         changelogCount: result.changelogEntriesWritten,
       });
     } catch (err) {
-      console.error("Manual sync failed:", err.message);
+      const detail = err.response?.data || err.message;
+      console.error("Manual sync failed:", JSON.stringify(detail));
       res.status(500).json({
         success: false,
-        error: err.message,
+        error: detail,
       });
     }
   }
