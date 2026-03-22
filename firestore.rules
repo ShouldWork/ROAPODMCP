@@ -39,6 +39,14 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Delivery checklist collection — authenticated users can read and write
+    match /deliveries/{doc} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow update: if request.auth != null;
+      allow delete: if false;
+    }
+
     // Existing token storage — admin only
     match /podium_tokens/{doc} {
       allow read, write: if false;
