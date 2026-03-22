@@ -1,7 +1,7 @@
 const { onRequest } = require("firebase-functions/https");
 const { defineSecret } = require("firebase-functions/params");
 const { initializeApp } = require("firebase-admin/app");
-const { getFirestore } = require("firebase-admin/firestore");
+const { getFirestore, FieldValue } = require("firebase-admin/firestore");
 const axios = require("axios");
 const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
 const { StreamableHTTPServerTransport } = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
@@ -31,6 +31,11 @@ const SCOPES = [
   "read_reviews",
   "read_users",
 ].join(" ");
+
+// ── Contact Sync constants ────────────────────────────────────────────────
+const CONTACT_SYNC_LOCATION_UID = "a79838e3-8d84-5dcf-9846-a7e6d0fbdd55";
+const PODIUM_CONTACTS_URL = "https://api.podium.com/v4/contacts";
+const CONTACT_SYNC_TRACKED_FIELDS = ["name", "phone", "email"];
 
 // ── Token helpers ──────────────────────────────────────────────────────────
 
@@ -144,6 +149,153 @@ function fail(err) {
   }
 
   return { content: [{ type: "text", text: `Error (${status || "unknown"}): ${message}` }], isError: true };
+}
+
+// ── Contact Sync helpers ───────────────────────────────────────────────────
+
+async function fetchAllContactsForSync(accessToken, updatedAfter) {
+  const contacts = [];
+  let cursor = null;
+
+  do {
+    const params = {
+      locationUid: CONTACT_SYNC_LOCATION_UID,
+      limit: 100,
+      updatedAfter,
+    };
+    if (cursor) params.cursor = cursor;
+
+    const response = await axios.get(PODIUM_CONTACTS_URL, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      params,
+    });
+
+    const data = response.data;
+    if (Array.isArray(data.data)) {
+      contacts.push(...data.data);
+    }
+
+    cursor = data.metadata?.nextCursor || null;
+  } while (cursor);
+
+  return contacts;
+}
+
+function extractContactFields(contact) {
+  return {
+    uid: contact.uid || null,
+    name: contact.name || null,
+    phone: contact.phoneNumbers?.[0]?.number ?? contact.phone ?? null,
+    email: contact.emails?.[0]?.address ?? contact.email ?? null,
+    updatedAt: contact.updatedAt || null,
+    createdAt: contact.createdAt || null,
+    locationUid: CONTACT_SYNC_LOCATION_UID,
+    _source: "podium_contact_sync",
+  };
+}
+
+async function runContactSync(accessToken, lookbackHours) {
+  const db = getFirestore();
+  const syncRunId = `sync_${Date.now()}`;
+  const stats = { created: 0, updated: 0, skipped: 0, errors: 0 };
+  let changelogEntriesWritten = 0;
+
+  const updatedAfter = new Date(
+    Date.now() - lookbackHours * 60 * 60 * 1000
+  ).toISOString();
+
+  let contacts = [];
+  let runError = null;
+
+  try {
+    contacts = await fetchAllContactsForSync(accessToken, updatedAfter);
+
+    for (const raw of contacts) {
+      try {
+        const contact = extractContactFields(raw);
+
+        if (!contact.uid) {
+          stats.skipped++;
+          continue;
+        }
+
+        const docRef = db.collection("podium_contacts").doc(contact.uid);
+        const existing = await docRef.get();
+
+        if (!existing.exists) {
+          await docRef.set({
+            ...contact,
+            _syncedAt: FieldValue.serverTimestamp(),
+          });
+          stats.created++;
+        } else {
+          const existingData = existing.data();
+          const changedFields = [];
+          const previousValues = {};
+          const newValues = {};
+
+          for (const field of CONTACT_SYNC_TRACKED_FIELDS) {
+            const oldVal = existingData[field] ?? null;
+            const newVal = contact[field] ?? null;
+            if (oldVal !== newVal) {
+              changedFields.push(field);
+              previousValues[field] = oldVal;
+              newValues[field] = newVal;
+            }
+          }
+
+          await docRef.set(
+            {
+              ...contact,
+              _syncedAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+          stats.updated++;
+
+          if (changedFields.length > 0) {
+            await db.collection("podium_sync_changelog").add({
+              uid: contact.uid,
+              name: contact.name,
+              changedFields,
+              previousValues,
+              newValues,
+              appliedAt: new Date().toISOString(),
+              syncRunId,
+            });
+            changelogEntriesWritten++;
+          }
+        }
+      } catch (contactErr) {
+        stats.errors++;
+        console.error(`Error processing contact ${raw.uid || "unknown"}:`, contactErr.message);
+      }
+    }
+  } catch (err) {
+    runError = err.message;
+    console.error("Sync run failed:", err.message);
+  }
+
+  await db.collection("podium_sync_log").add({
+    syncRunId,
+    success: runError === null,
+    updatedAfter,
+    lookbackHours,
+    contactsFetched: contacts.length,
+    stats,
+    changelogEntriesWritten,
+    timestamp: FieldValue.serverTimestamp(),
+    error: runError,
+  });
+
+  if (runError) {
+    throw new Error(runError);
+  }
+
+  return { stats, changelogEntriesWritten, syncRunId };
 }
 
 // ── MCP server factory ─────────────────────────────────────────────────────
@@ -962,6 +1114,34 @@ function createMcpServer(accessToken) {
         const params = buildParams({ limit, locationUid, cursor });
         const { data } = await api.get("/feedback", { params });
         return ok(data);
+      } catch (err) { return fail(err); }
+    }
+  );
+
+  // ────────────────────────────────────────────────────────────────────────
+  // CONTACT SYNC
+  // ────────────────────────────────────────────────────────────────────────
+
+  server.tool(
+    "run_contact_sync",
+    "Manually trigger a Podium-to-Firestore contact sync. Fetches contacts updated within the lookback window, creates or updates them in Firestore, and logs field-level changes to the changelog. Returns stats (created, updated, skipped, errors) and changelog count. Use this when asked to sync contacts, refresh the contact database, or pull in recent contact changes from Podium.",
+    {
+      lookbackHours: z
+        .number()
+        .optional()
+        .describe("How many hours back to look for updated contacts (default 25)."),
+    },
+    async ({ lookbackHours }) => {
+      try {
+        const hours = lookbackHours || 25;
+        const result = await runContactSync(accessToken, hours);
+        return ok({
+          success: true,
+          lookbackHours: hours,
+          stats: result.stats,
+          changelogCount: result.changelogEntriesWritten,
+          syncRunId: result.syncRunId,
+        });
       } catch (err) { return fail(err); }
     }
   );
