@@ -7,13 +7,58 @@ const axios = require("axios");
 
 initializeApp();
 
-// ── Secrets ──────────────────────────────────────────────────────────────────
-const PODIUM_API_KEY = defineSecret("PODIUM_API_KEY");
+// ── Secrets (reuse existing OAuth credentials) ──────────────────────────────
+const PODIUM_CLIENT_ID = defineSecret("PODIUM_CLIENT_ID");
+const PODIUM_CLIENT_SECRET = defineSecret("PODIUM_CLIENT_SECRET");
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const LOCATION_UID = "a79838e3-8d84-5dcf-9846-a7e6d0fbdd55";
 const PODIUM_CONTACTS_URL = "https://api.podium.com/v4/contacts";
+const PODIUM_TOKEN_URL = "https://api.podium.com/oauth/token";
 const TRACKED_FIELDS = ["name", "phone", "email"];
+
+// ── Token management ────────────────────────────────────────────────────────
+
+/**
+ * Load the stored access token from Firestore, refreshing it automatically
+ * if it has expired (or will expire within 5 minutes).
+ */
+async function getAccessToken(clientId, clientSecret) {
+  const db = getFirestore();
+  const doc = await db.collection("podium_tokens").doc("primary").get();
+  if (!doc.exists) throw new Error("No Podium token stored. Run the OAuth flow first.");
+
+  const data = doc.data();
+  const { access_token, refresh_token, expires_in, updated_at } = data;
+
+  const updatedMs = new Date(updated_at).getTime();
+  const expiresMs = updatedMs + expires_in * 1000;
+  const BUFFER_MS = 5 * 60 * 1000;
+
+  if (Date.now() < expiresMs - BUFFER_MS) {
+    return access_token;
+  }
+
+  // Token expired — refresh it
+  const response = await axios.post(
+    PODIUM_TOKEN_URL,
+    new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token,
+      client_id: clientId,
+      client_secret: clientSecret,
+    }).toString(),
+    { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+  );
+
+  const tokens = response.data;
+  await db.collection("podium_tokens").doc("primary").set({
+    ...tokens,
+    updated_at: new Date().toISOString(),
+  });
+
+  return tokens.access_token;
+}
 
 // ── Podium API helpers ───────────────────────────────────────────────────────
 
@@ -21,7 +66,7 @@ const TRACKED_FIELDS = ["name", "phone", "email"];
  * Fetch all contacts updated after the given ISO timestamp, paginating
  * through all pages until no nextCursor is returned.
  */
-async function fetchAllContacts(apiKey, updatedAfter) {
+async function fetchAllContacts(accessToken, updatedAfter) {
   const contacts = [];
   let cursor = null;
 
@@ -35,7 +80,7 @@ async function fetchAllContacts(apiKey, updatedAfter) {
 
     const response = await axios.get(PODIUM_CONTACTS_URL, {
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${accessToken}`,
         "Content-Type": "application/json",
       },
       params,
@@ -70,7 +115,7 @@ function extractContactFields(contact) {
 
 // ── Core sync logic ──────────────────────────────────────────────────────────
 
-async function syncContacts(apiKey, lookbackHours) {
+async function syncContacts(accessToken, lookbackHours) {
   const db = getFirestore();
   const syncRunId = `sync_${Date.now()}`;
   const stats = { created: 0, updated: 0, skipped: 0, errors: 0 };
@@ -84,7 +129,7 @@ async function syncContacts(apiKey, lookbackHours) {
   let runError = null;
 
   try {
-    contacts = await fetchAllContacts(apiKey, updatedAfter);
+    contacts = await fetchAllContacts(accessToken, updatedAfter);
     console.log(`Fetched ${contacts.length} contacts from Podium (updatedAfter: ${updatedAfter})`);
 
     for (const raw of contacts) {
@@ -190,10 +235,11 @@ exports.podiumContactSyncScheduled = onSchedule(
   {
     schedule: "0 8 * * *",
     timeZone: "America/Denver",
-    secrets: [PODIUM_API_KEY],
+    secrets: [PODIUM_CLIENT_ID, PODIUM_CLIENT_SECRET],
   },
   async () => {
-    const result = await syncContacts(PODIUM_API_KEY.value(), 25);
+    const accessToken = await getAccessToken(PODIUM_CLIENT_ID.value(), PODIUM_CLIENT_SECRET.value());
+    const result = await syncContacts(accessToken, 25);
     console.log("Scheduled sync complete:", JSON.stringify(result.stats));
   }
 );
@@ -203,7 +249,7 @@ exports.podiumContactSyncScheduled = onSchedule(
  */
 exports.podiumContactSyncManual = onRequest(
   {
-    secrets: [PODIUM_API_KEY],
+    secrets: [PODIUM_CLIENT_ID, PODIUM_CLIENT_SECRET],
   },
   async (req, res) => {
     if (req.method !== "POST") {
@@ -214,7 +260,8 @@ exports.podiumContactSyncManual = onRequest(
     const lookbackHours = req.body?.lookbackHours || 25;
 
     try {
-      const result = await syncContacts(PODIUM_API_KEY.value(), lookbackHours);
+      const accessToken = await getAccessToken(PODIUM_CLIENT_ID.value(), PODIUM_CLIENT_SECRET.value());
+      const result = await syncContacts(accessToken, lookbackHours);
       res.status(200).json({
         success: true,
         stats: result.stats,
