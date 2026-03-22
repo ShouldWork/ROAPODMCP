@@ -9,6 +9,7 @@ import CoachWorkload from "./tabs/CoachWorkload";
 import CampaignAnalysis from "./tabs/CampaignAnalysis";
 import ContactSearch from "./tabs/ContactSearch";
 import Users from "./tabs/Users";
+import Reviews from "./tabs/Reviews";
 
 const TABS = [
   { key: "overview", label: "Overview" },
@@ -17,6 +18,7 @@ const TABS = [
   { key: "workload", label: "Coach Workload" },
   { key: "campaigns", label: "Campaign Analysis" },
   { key: "contacts", label: "Contact Search" },
+  { key: "reviews", label: "Reviews" },
   { key: "users", label: "Users" },
 ];
 
@@ -106,6 +108,7 @@ export default function App() {
         {tab === "workload" && <CoachWorkload />}
         {tab === "campaigns" && <CampaignAnalysis />}
         {tab === "contacts" && <ContactSearch />}
+        {tab === "reviews" && <Reviews />}
         {tab === "users" && <Users />}
       </main>
     </div>

@@ -1410,6 +1410,8 @@ exports.podiumWebhook = onRequest(
           body: data.review?.body || data.body || null,
           source: data.review?.source || data.platform || null,
           locationUid: data.locationUid || null,
+          needsResponse: data.needsResponse !== undefined ? data.needsResponse : true,
+          responseCount: data.responses?.length || 0,
           createdAt: data.createdAt ? new Date(data.createdAt) : null,
           _ingestedAt: new Date(),
         }, { merge: true });

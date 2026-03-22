@@ -59,6 +59,14 @@
         { "fieldPath": "createdAt", "order": "DESCENDING" }
       ]
     }
+    {
+      "collectionGroup": "podium_reviews",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "needsResponse", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    }
   ],
   "fieldOverrides": []
 }
