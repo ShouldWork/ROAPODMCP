@@ -89,21 +89,18 @@ export default function Dashboard({ onOpen }) {
         {/* Status counts */}
         <div className="dl-glass-card">
           <h3 className="dl-card-title">Delivery Pipeline</h3>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div className="dl-pipeline-grid">
             {[
               { label: "Pending", value: pending, color: "#8b7fc7" },
-              { label: "In Prep", value: inProgress, color: "#e0a030" },
-              { label: "Ready", value: ready, color: "#4caf7c" },
+              { label: "In Prep", value: inProgress, color: "#f0a030" },
+              { label: "Ready", value: ready, color: "#34c77b" },
               { label: "Completed", value: completed, color: "#7c5ce0" },
             ].map((s) => (
-              <div key={s.label} style={{
-                background: s.color + "10",
-                borderRadius: 14,
-                padding: "18px 16px",
-                textAlign: "center",
+              <div key={s.label} className="dl-pipeline-stat" style={{
+                background: s.color + "0c",
               }}>
-                <div style={{ fontSize: 32, fontWeight: 700, color: s.color, lineHeight: 1 }}>{s.value}</div>
-                <div style={{ fontSize: 11, fontWeight: 600, color: s.color, textTransform: "uppercase", letterSpacing: 0.5, marginTop: 4 }}>{s.label}</div>
+                <div className="dl-pipeline-num" style={{ color: s.color }}>{s.value}</div>
+                <div className="dl-pipeline-label" style={{ color: s.color }}>{s.label}</div>
               </div>
             ))}
           </div>
