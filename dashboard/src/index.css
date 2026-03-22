@@ -418,81 +418,353 @@ tr { cursor: pointer; transition: background 0.1s; }
   color: var(--white);
 }
 
-/* ── Reviews ──────────────────────────────────────────────────────────── */
-.reviews-columns {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 24px;
-  align-items: start;
+/* ── Reviews (glassmorphic) ────────────────────────────────────────────── */
+.rv-wrap {
+  background: linear-gradient(135deg, #f0eaff 0%, #e8f5f0 40%, #faf0ff 70%, #eaf6e8 100%);
+  margin: -32px -36px;
+  padding: 36px 40px;
+  min-height: calc(100vh - 0px);
 }
-.reviews-column {
+.rv-wrap .loading {
+  color: #8b7fc7;
+}
+
+/* Hero header */
+.rv-hero {
   display: flex;
-  flex-direction: column;
-  gap: 12px;
+  justify-content: space-between;
+  align-items: flex-end;
+  margin-bottom: 28px;
+  gap: 24px;
 }
-.review-card {
-  background: var(--white);
-  border-radius: 8px;
-  padding: 16px 20px;
-  border: 1px solid #e8e8e8;
-  transition: box-shadow 0.15s;
+.rv-hero-left { flex: 1; }
+.rv-title {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 32px;
+  font-weight: 700;
+  color: #1a1035;
+  text-transform: none;
+  letter-spacing: -0.5px;
+  margin-bottom: 6px;
 }
-.review-card:hover {
-  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+.rv-subtitle {
+  font-size: 14px;
+  color: #8b7fc7;
+  font-weight: 400;
 }
-.review-card-header {
+.rv-hero-stats {
+  display: flex;
+  gap: 32px;
+  align-items: flex-end;
+}
+.rv-score {
+  text-align: center;
+  position: relative;
+}
+.rv-score-value {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 48px;
+  font-weight: 700;
+  line-height: 1;
+  color: #1a1035;
+}
+.rv-score-max {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 18px;
+  font-weight: 600;
+  color: #b0a8d0;
+}
+.rv-score-label {
+  display: block;
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #8b7fc7;
+  margin-top: 2px;
+}
+
+/* Glass card base */
+.rv-glass-card {
+  background: rgba(255, 255, 255, 0.65);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  box-shadow: 0 4px 24px rgba(120, 100, 180, 0.08);
+  padding: 24px;
+  transition: box-shadow 0.2s, transform 0.2s;
+}
+.rv-glass-card:hover {
+  box-shadow: 0 8px 32px rgba(120, 100, 180, 0.14);
+}
+
+.rv-card-title {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 16px;
+  font-weight: 700;
+  color: #1a1035;
+  text-transform: none;
+  letter-spacing: 0;
+  margin-bottom: 16px;
+}
+.rv-card-title-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 4px;
+  margin-bottom: 16px;
 }
-.review-card-header strong {
-  font-size: 14px;
+.rv-card-title-row .rv-card-title {
+  margin-bottom: 0;
 }
-.review-source {
+.rv-count-badge {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 13px;
+  font-weight: 700;
+  background: linear-gradient(135deg, #e8dff5, #d5eee0);
+  color: #6b5ca5;
+  padding: 4px 14px;
+  border-radius: 20px;
+}
+
+/* Main grid layout */
+.rv-grid {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 24px;
+  align-items: start;
+}
+.rv-left {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.rv-right {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* Rating distribution card */
+.rv-dist-card {
+  background: rgba(255, 255, 255, 0.72);
+}
+.rv-dist-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.rv-dist-row:last-child { margin-bottom: 0; }
+.rv-dist-label {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  color: #5a5080;
+  min-width: 52px;
+}
+.rv-dist-track {
+  flex: 1;
+  height: 10px;
+  background: rgba(200, 190, 230, 0.2);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.rv-dist-fill {
+  height: 100%;
+  border-radius: 6px;
+  background: linear-gradient(90deg, #b39ddb, #9575cd, #7e57c2);
+  transition: width 0.6s ease;
+}
+.rv-dist-pct {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 13px;
+  font-weight: 700;
+  color: #5a5080;
+  min-width: 36px;
+  text-align: right;
+}
+
+/* Reviews table inside glass card */
+.rv-table-card { padding-bottom: 8px; }
+.rv-table {
+  background: transparent;
+  border-radius: 0;
+}
+.rv-table th {
+  background: transparent;
+  color: #8b7fc7;
+  border-bottom: 1px solid rgba(140, 120, 200, 0.15);
+  padding: 10px 14px;
+  font-size: 11px;
+}
+.rv-table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(140, 120, 200, 0.08);
+  color: #2a2045;
+  font-size: 13px;
+}
+.rv-table tr {
+  cursor: default;
+  transition: background 0.15s;
+}
+.rv-table tr:hover {
+  background: rgba(140, 120, 200, 0.06);
+}
+.rv-table tr:last-child td {
+  border-bottom: none;
+}
+
+/* Rating pill */
+.rv-rating-pill {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 12px;
+  white-space: nowrap;
+  letter-spacing: 1px;
+}
+
+/* Source pill */
+.rv-source-pill {
   font-family: 'Rajdhani', sans-serif;
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: var(--gray);
-  background: var(--off-white);
-  padding: 2px 8px;
-  border-radius: 10px;
+  color: #7a6fb0;
+  background: rgba(140, 120, 200, 0.1);
+  padding: 3px 10px;
+  border-radius: 12px;
 }
-.review-rating {
+
+.rv-date-cell {
+  color: #8b7fc7;
+  font-size: 12px;
+}
+
+/* Awaiting Response column */
+.rv-response-card {
+  max-height: calc(100vh - 160px);
+  overflow-y: auto;
+  padding-right: 16px;
+}
+.rv-response-card::-webkit-scrollbar {
+  width: 4px;
+}
+.rv-response-card::-webkit-scrollbar-track {
+  background: transparent;
+}
+.rv-response-card::-webkit-scrollbar-thumb {
+  background: rgba(140, 120, 200, 0.2);
+  border-radius: 4px;
+}
+.rv-resp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Individual response card */
+.rv-resp-card {
+  background: rgba(255, 255, 255, 0.5);
+  border: 1px solid rgba(200, 190, 230, 0.25);
+  border-radius: 14px;
+  padding: 16px;
+  transition: all 0.2s;
+}
+.rv-resp-card:hover {
+  background: rgba(255, 255, 255, 0.8);
+  border-color: rgba(160, 140, 210, 0.35);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(120, 100, 180, 0.1);
+}
+
+.rv-resp-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.rv-resp-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #c5b3e8, #a8e6cf);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Rajdhani', sans-serif;
+  font-weight: 700;
   font-size: 16px;
-  letter-spacing: 2px;
-  margin-bottom: 6px;
+  color: #fff;
+  flex-shrink: 0;
 }
-.review-body {
+.rv-resp-info {
+  flex: 1;
+  min-width: 0;
+}
+.rv-resp-info strong {
+  display: block;
+  font-size: 14px;
+  color: #1a1035;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rv-resp-date {
+  font-size: 11px;
+  color: #8b7fc7;
+}
+
+.rv-resp-body {
   font-size: 13px;
-  line-height: 1.6;
-  color: var(--mid-dark);
-  margin-bottom: 6px;
+  line-height: 1.65;
+  color: #4a4060;
+  margin-bottom: 10px;
 }
-.review-toggle {
+
+.rv-read-more {
   background: none;
   border: none;
-  color: var(--gray);
+  color: #7c5ce0;
   font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
   padding: 0;
   margin-left: 4px;
+}
+.rv-read-more:hover {
   text-decoration: underline;
 }
-.review-toggle:hover {
-  color: var(--dark);
+
+.rv-resp-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
-.review-date {
+.rv-needs-badge {
+  font-family: 'Rajdhani', sans-serif;
   font-size: 11px;
-  color: var(--gray);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #d45c5c;
+  background: rgba(220, 90, 90, 0.1);
+  padding: 3px 10px;
+  border-radius: 12px;
 }
 
 /* ── Responsive ────────────────────────────────────────────────────────── */
 @media (max-width: 900px) {
   .chart-grid { grid-template-columns: 1fr; }
-  .reviews-columns { grid-template-columns: 1fr; }
+  .rv-grid { grid-template-columns: 1fr; }
+  .rv-hero { flex-direction: column; align-items: flex-start; }
+  .rv-hero-stats { gap: 20px; }
+  .rv-wrap { padding: 24px 20px; margin: -20px; }
+  .rv-response-card { max-height: none; }
   .sidebar { width: 60px; padding: 16px 8px; }
   .sidebar h1, .sidebar .subtitle, .nav-btn span { display: none; }
   .main { margin-left: 60px; padding: 20px; }
