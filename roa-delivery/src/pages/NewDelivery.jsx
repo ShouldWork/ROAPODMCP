@@ -1,7 +1,4 @@
 import { useState } from "react";
-import { collection, addDoc, serverTimestamp } from "firebase/firestore";
-import { db } from "../firebase";
-import { CHECKLIST_TEMPLATE } from "../checklist";
 
 export default function NewDelivery({ onCreated }) {
   const [form, setForm] = useState({
@@ -16,26 +13,15 @@ export default function NewDelivery({ onCreated }) {
     scheduledDate: "",
     notes: "",
   });
-  const [saving, setSaving] = useState(false);
 
   function update(field, value) {
     setForm((f) => ({ ...f, [field]: value }));
   }
 
-  async function handleSubmit(e) {
+  function handleSubmit(e) {
     e.preventDefault();
-    setSaving(true);
-
-    const docRef = await addDoc(collection(db, "deliveries"), {
-      ...form,
-      scheduledDate: form.scheduledDate ? new Date(form.scheduledDate) : null,
-      status: "pending",
-      checklist: CHECKLIST_TEMPLATE.map((item) => ({ ...item })),
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-
-    onCreated(docRef.id);
+    // Mockup — just navigate to a placeholder detail
+    onCreated("mock-1");
   }
 
   return (
@@ -102,8 +88,8 @@ export default function NewDelivery({ onCreated }) {
           </div>
         </div>
 
-        <button className="dl-btn dl-btn-primary dl-submit-btn" type="submit" disabled={saving}>
-          {saving ? "Creating..." : "Create Delivery"}
+        <button className="dl-btn dl-btn-primary dl-submit-btn" type="submit">
+          Create Delivery
         </button>
       </form>
     </div>

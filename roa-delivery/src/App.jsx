@@ -1,59 +1,7 @@
-import { useState, useEffect } from "react";
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
-import { auth } from "./firebase";
+import { useState } from "react";
 import Dashboard from "./pages/Dashboard";
 import DeliveryDetail from "./pages/DeliveryDetail";
 import NewDelivery from "./pages/NewDelivery";
-
-function Login() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  async function handleLogin(e) {
-    e.preventDefault();
-    setError("");
-    setLoading(true);
-    try {
-      await signInWithEmailAndPassword(auth, email, password);
-    } catch {
-      setError("Invalid email or password.");
-      setLoading(false);
-    }
-  }
-
-  return (
-    <div className="login-screen">
-      <div className="login-box">
-        <div className="login-brand">ROA Delivery</div>
-        <p className="login-sub">Internal delivery checklist management</p>
-        <form onSubmit={handleLogin}>
-          <input
-            type="email"
-            placeholder="Email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            className="dl-input"
-            required
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="dl-input"
-            required
-          />
-          {error && <div className="login-error">{error}</div>}
-          <button className="dl-btn dl-btn-primary" type="submit" disabled={loading} style={{ width: "100%" }}>
-            {loading ? "Signing in..." : "Sign In"}
-          </button>
-        </form>
-      </div>
-    </div>
-  );
-}
 
 const NAV_ITEMS = [
   { key: "dashboard", label: "Dashboard" },
@@ -61,13 +9,8 @@ const NAV_ITEMS = [
 ];
 
 export default function App() {
-  const [user, setUser] = useState(undefined);
   const [page, setPage] = useState("dashboard");
   const [selectedId, setSelectedId] = useState(null);
-
-  useEffect(() => {
-    return onAuthStateChanged(auth, (u) => setUser(u));
-  }, []);
 
   function openDelivery(id) {
     setSelectedId(id);
@@ -78,9 +21,6 @@ export default function App() {
     setSelectedId(null);
     setPage("dashboard");
   }
-
-  if (user === undefined) return <div className="dl-loading">Loading...</div>;
-  if (!user) return <Login />;
 
   return (
     <div className="dl-app">
@@ -101,8 +41,8 @@ export default function App() {
           </div>
         </div>
         <div className="dl-nav-right">
-          <span className="dl-user-email">{user.email}</span>
-          <button className="dl-nav-btn" onClick={() => signOut(auth)}>Sign Out</button>
+          <span className="dl-user-email">demo@roa-rv.com</span>
+          <button className="dl-nav-btn">Sign Out</button>
         </div>
       </nav>
 

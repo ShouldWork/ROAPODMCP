@@ -1,18 +1,15 @@
-import { useState, useEffect } from "react";
-import { doc, getDoc, updateDoc, serverTimestamp } from "firebase/firestore";
-import { db, auth } from "../firebase";
+import { useState } from "react";
 import { CATEGORIES, STATUS_OPTIONS } from "../checklist";
+import { MOCK_DELIVERIES } from "../mockData";
 
-function fmtDate(ts) {
-  if (!ts) return "—";
-  const d = ts.toDate ? ts.toDate() : new Date(ts);
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+function fmtDate(d) {
+  if (!d) return "—";
+  return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
-function fmtTime(ts) {
-  if (!ts) return "";
-  const d = ts.toDate ? ts.toDate() : new Date(ts);
-  return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+function fmtTime(d) {
+  if (!d) return "";
+  return new Date(d).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 function statusInfo(key) {
@@ -20,56 +17,9 @@ function statusInfo(key) {
 }
 
 export default function DeliveryDetail({ id, onBack }) {
-  const [delivery, setDelivery] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const found = MOCK_DELIVERIES.find((d) => d.id === id);
+  const [delivery, setDelivery] = useState(found);
 
-  useEffect(() => {
-    async function load() {
-      const snap = await getDoc(doc(db, "deliveries", id));
-      if (snap.exists()) {
-        setDelivery({ id: snap.id, ...snap.data() });
-      }
-      setLoading(false);
-    }
-    load();
-  }, [id]);
-
-  async function toggleItem(itemId) {
-    if (!delivery || saving) return;
-    setSaving(true);
-
-    const newChecklist = delivery.checklist.map((c) => {
-      if (c.id !== itemId) return c;
-      return {
-        ...c,
-        completed: !c.completed,
-        completedBy: !c.completed ? (auth.currentUser?.email || "unknown") : null,
-        completedAt: !c.completed ? new Date().toISOString() : null,
-      };
-    });
-
-    await updateDoc(doc(db, "deliveries", id), {
-      checklist: newChecklist,
-      updatedAt: serverTimestamp(),
-    });
-
-    setDelivery({ ...delivery, checklist: newChecklist });
-    setSaving(false);
-  }
-
-  async function updateStatus(newStatus) {
-    if (!delivery || saving) return;
-    setSaving(true);
-    await updateDoc(doc(db, "deliveries", id), {
-      status: newStatus,
-      updatedAt: serverTimestamp(),
-    });
-    setDelivery({ ...delivery, status: newStatus });
-    setSaving(false);
-  }
-
-  if (loading) return <div className="dl-loading">Loading delivery...</div>;
   if (!delivery) return <div className="dl-loading">Delivery not found.</div>;
 
   const checklist = delivery.checklist || [];
@@ -83,6 +33,23 @@ export default function DeliveryDetail({ id, onBack }) {
   for (const item of checklist) {
     if (!grouped[item.category]) grouped[item.category] = [];
     grouped[item.category].push(item);
+  }
+
+  function toggleItem(itemId) {
+    const newChecklist = delivery.checklist.map((c) => {
+      if (c.id !== itemId) return c;
+      return {
+        ...c,
+        completed: !c.completed,
+        completedBy: !c.completed ? "demo@roa-rv.com" : null,
+        completedAt: !c.completed ? new Date().toISOString() : null,
+      };
+    });
+    setDelivery({ ...delivery, checklist: newChecklist });
+  }
+
+  function updateStatus(newStatus) {
+    setDelivery({ ...delivery, status: newStatus });
   }
 
   return (
@@ -180,7 +147,6 @@ export default function DeliveryDetail({ id, onBack }) {
                   borderColor: delivery.status === s.key ? s.color + "40" : undefined,
                 }}
                 onClick={() => updateStatus(s.key)}
-                disabled={saving}
               >
                 <span className="dl-status-dot" style={{ background: s.color }} />
                 {s.label}

@@ -1,13 +1,6 @@
-import { useState, useEffect } from "react";
-import { collection, query, getDocs, orderBy, limit, where } from "firebase/firestore";
-import { db } from "../firebase";
+import { useState } from "react";
 import { STATUS_OPTIONS } from "../checklist";
-
-function fmtDate(ts) {
-  if (!ts) return "—";
-  const d = ts.toDate ? ts.toDate() : new Date(ts);
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-}
+import { MOCK_DELIVERIES } from "../mockData";
 
 function statusInfo(key) {
   return STATUS_OPTIONS.find((s) => s.key === key) || STATUS_OPTIONS[0];
@@ -18,21 +11,14 @@ function progressPct(checklist) {
   return Math.round((checklist.filter((c) => c.completed).length / checklist.length) * 100);
 }
 
-export default function Dashboard({ onOpen }) {
-  const [deliveries, setDeliveries] = useState([]);
-  const [filter, setFilter] = useState("all");
-  const [loading, setLoading] = useState(true);
+function fmtDate(d) {
+  if (!d) return "—";
+  return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
 
-  useEffect(() => {
-    async function load() {
-      const snap = await getDocs(
-        query(collection(db, "deliveries"), orderBy("createdAt", "desc"), limit(100))
-      );
-      setDeliveries(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-      setLoading(false);
-    }
-    load();
-  }, []);
+export default function Dashboard({ onOpen }) {
+  const [filter, setFilter] = useState("all");
+  const deliveries = MOCK_DELIVERIES;
 
   // Stats
   const pending = deliveries.filter((d) => d.status === "pending").length;
@@ -46,8 +32,6 @@ export default function Dashboard({ onOpen }) {
     : filter === "completed"
       ? deliveries.filter((d) => d.status === "completed")
       : deliveries.filter((d) => d.status === filter);
-
-  if (loading) return <div className="dl-loading">Loading deliveries...</div>;
 
   return (
     <div className="dl-page">
@@ -113,13 +97,7 @@ export default function Dashboard({ onOpen }) {
               <span className="dl-qs-label">Avg Progress</span>
             </div>
             <div className="dl-quick-stat">
-              <span className="dl-qs-num">
-                {deliveries.filter((d) => {
-                  const sd = d.scheduledDate?.toDate ? d.scheduledDate.toDate() : new Date(d.scheduledDate);
-                  const today = new Date();
-                  return sd && sd.toDateString() === today.toDateString();
-                }).length}
-              </span>
+              <span className="dl-qs-num">2</span>
               <span className="dl-qs-label">Due Today</span>
             </div>
           </div>
