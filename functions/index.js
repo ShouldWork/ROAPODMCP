@@ -154,14 +154,12 @@ function fail(err) {
 // ── Contact Sync helpers ───────────────────────────────────────────────────
 
 async function fetchAllContactsForSync(accessToken, updatedAfter) {
-  const contacts = [];
+  const allContacts = [];
   let cursor = null;
+  const cutoff = new Date(updatedAfter).getTime();
 
   do {
-    const params = {
-      limit: 100,
-      updatedAfter,
-    };
+    const params = { limit: 100 };
     if (cursor) params.cursor = cursor;
 
     const response = await axios.get(PODIUM_CONTACTS_URL, {
@@ -174,13 +172,18 @@ async function fetchAllContactsForSync(accessToken, updatedAfter) {
 
     const data = response.data;
     if (Array.isArray(data.data)) {
-      contacts.push(...data.data);
+      allContacts.push(...data.data);
     }
 
     cursor = data.metadata?.nextCursor || null;
   } while (cursor);
 
-  return contacts;
+  // Podium v4 /contacts doesn't support server-side date filtering,
+  // so we filter locally by updatedAt.
+  return allContacts.filter((c) => {
+    const ts = c.updatedAt ? new Date(c.updatedAt).getTime() : 0;
+    return ts >= cutoff;
+  });
 }
 
 function extractContactFields(contact) {
@@ -895,12 +898,11 @@ function createMcpServer(accessToken) {
     "[LIVE API] List all contacts directly from Podium API with cursor pagination.",
     {
       limit: z.number().optional().describe("Max results (default 10, max 100)."),
-      locationUid: z.string().optional().describe("Filter to a specific location."),
       cursor: z.string().optional().describe("Pagination cursor from a previous response."),
     },
-    async ({ limit, locationUid, cursor }) => {
+    async ({ limit, cursor }) => {
       try {
-        const params = buildParams({ limit, locationUid, cursor });
+        const params = buildParams({ limit, cursor });
         const { data } = await api.get("/contacts", { params });
         return ok(data);
       } catch (err) { return fail(err); }

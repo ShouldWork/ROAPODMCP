@@ -75,14 +75,12 @@ async function getAccessToken(clientId, clientSecret) {
  * through all pages until no nextCursor is returned.
  */
 async function fetchAllContacts(accessToken, updatedAfter) {
-  const contacts = [];
+  const allContacts = [];
   let cursor = null;
+  const cutoff = new Date(updatedAfter).getTime();
 
   do {
-    const params = {
-      limit: 100,
-      updatedAfter,
-    };
+    const params = { limit: 100 };
     if (cursor) params.cursor = cursor;
 
     const response = await axios.get(PODIUM_CONTACTS_URL, {
@@ -95,13 +93,18 @@ async function fetchAllContacts(accessToken, updatedAfter) {
 
     const data = response.data;
     if (Array.isArray(data.data)) {
-      contacts.push(...data.data);
+      allContacts.push(...data.data);
     }
 
     cursor = data.metadata?.nextCursor || null;
   } while (cursor);
 
-  return contacts;
+  // Podium v4 /contacts doesn't support server-side date filtering,
+  // so we filter locally by updatedAt.
+  return allContacts.filter((c) => {
+    const ts = c.updatedAt ? new Date(c.updatedAt).getTime() : 0;
+    return ts >= cutoff;
+  });
 }
 
 /**
