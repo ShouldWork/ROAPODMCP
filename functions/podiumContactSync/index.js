@@ -1,0 +1,231 @@
+const { onSchedule } = require("firebase-functions/v2/scheduler");
+const { onRequest } = require("firebase-functions/v2/https");
+const { defineSecret } = require("firebase-functions/params");
+const { initializeApp } = require("firebase-admin/app");
+const { getFirestore, FieldValue } = require("firebase-admin/firestore");
+const axios = require("axios");
+
+initializeApp();
+
+// ── Secrets ──────────────────────────────────────────────────────────────────
+const PODIUM_API_KEY = defineSecret("PODIUM_API_KEY");
+
+// ── Constants ────────────────────────────────────────────────────────────────
+const LOCATION_UID = "a79838e3-8d84-5dcf-9846-a7e6d0fbdd55";
+const PODIUM_CONTACTS_URL = "https://api.podium.com/v4/contacts";
+const TRACKED_FIELDS = ["name", "phone", "email"];
+
+// ── Podium API helpers ───────────────────────────────────────────────────────
+
+/**
+ * Fetch all contacts updated after the given ISO timestamp, paginating
+ * through all pages until no nextCursor is returned.
+ */
+async function fetchAllContacts(apiKey, updatedAfter) {
+  const contacts = [];
+  let cursor = null;
+
+  do {
+    const params = {
+      locationUid: LOCATION_UID,
+      limit: 100,
+      updatedAfter,
+    };
+    if (cursor) params.cursor = cursor;
+
+    const response = await axios.get(PODIUM_CONTACTS_URL, {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      params,
+    });
+
+    const data = response.data;
+    if (Array.isArray(data.data)) {
+      contacts.push(...data.data);
+    }
+
+    cursor = data.metadata?.nextCursor || null;
+  } while (cursor);
+
+  return contacts;
+}
+
+/**
+ * Extract normalized fields from a Podium contact object.
+ */
+function extractContactFields(contact) {
+  return {
+    uid: contact.uid || null,
+    name: contact.name || null,
+    phone: contact.phoneNumbers?.[0]?.number ?? contact.phone ?? null,
+    email: contact.emails?.[0]?.address ?? contact.email ?? null,
+    updatedAt: contact.updatedAt || null,
+    createdAt: contact.createdAt || null,
+    locationUid: LOCATION_UID,
+    _source: "podium_contact_sync",
+  };
+}
+
+// ── Core sync logic ──────────────────────────────────────────────────────────
+
+async function syncContacts(apiKey, lookbackHours) {
+  const db = getFirestore();
+  const syncRunId = `sync_${Date.now()}`;
+  const stats = { created: 0, updated: 0, skipped: 0, errors: 0 };
+  let changelogEntriesWritten = 0;
+
+  const updatedAfter = new Date(
+    Date.now() - lookbackHours * 60 * 60 * 1000
+  ).toISOString();
+
+  let contacts = [];
+  let runError = null;
+
+  try {
+    contacts = await fetchAllContacts(apiKey, updatedAfter);
+    console.log(`Fetched ${contacts.length} contacts from Podium (updatedAfter: ${updatedAfter})`);
+
+    for (const raw of contacts) {
+      try {
+        const contact = extractContactFields(raw);
+
+        if (!contact.uid) {
+          stats.skipped++;
+          continue;
+        }
+
+        const docRef = db.collection("podium_contacts").doc(contact.uid);
+        const existing = await docRef.get();
+
+        if (!existing.exists) {
+          // ── New contact ──────────────────────────────────────────────
+          await docRef.set({
+            ...contact,
+            _syncedAt: FieldValue.serverTimestamp(),
+          });
+          stats.created++;
+          console.log(`Created contact: ${contact.name} (${contact.uid})`);
+        } else {
+          // ── Existing contact — check for field changes ───────────────
+          const existingData = existing.data();
+          const changedFields = [];
+          const previousValues = {};
+          const newValues = {};
+
+          for (const field of TRACKED_FIELDS) {
+            const oldVal = existingData[field] ?? null;
+            const newVal = contact[field] ?? null;
+            if (oldVal !== newVal) {
+              changedFields.push(field);
+              previousValues[field] = oldVal;
+              newValues[field] = newVal;
+            }
+          }
+
+          // Always write the contact with updated metadata
+          await docRef.set(
+            {
+              ...contact,
+              _syncedAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+          stats.updated++;
+
+          if (changedFields.length > 0) {
+            // Write changelog entry
+            await db.collection("podium_sync_changelog").add({
+              uid: contact.uid,
+              name: contact.name,
+              changedFields,
+              previousValues,
+              newValues,
+              appliedAt: new Date().toISOString(),
+              syncRunId,
+            });
+            changelogEntriesWritten++;
+            console.log(
+              `Updated contact with field changes: ${contact.name} (${contact.uid}) — fields: ${changedFields.join(", ")}`
+            );
+          }
+        }
+      } catch (contactErr) {
+        stats.errors++;
+        console.error(`Error processing contact ${raw.uid || "unknown"}:`, contactErr.message);
+      }
+    }
+  } catch (err) {
+    runError = err.message;
+    console.error("Sync run failed:", err.message);
+  }
+
+  // ── Write sync run log ───────────────────────────────────────────────────
+  await db.collection("podium_sync_log").add({
+    syncRunId,
+    success: runError === null,
+    updatedAfter,
+    lookbackHours,
+    contactsFetched: contacts.length,
+    stats,
+    changelogEntriesWritten,
+    timestamp: FieldValue.serverTimestamp(),
+    error: runError,
+  });
+
+  if (runError) {
+    throw new Error(runError);
+  }
+
+  return { stats, changelogEntriesWritten, syncRunId };
+}
+
+// ── Exported Cloud Functions ─────────────────────────────────────────────────
+
+/**
+ * Scheduled function — runs daily at 2:00 AM MT (8:00 AM UTC).
+ */
+exports.podiumContactSyncScheduled = onSchedule(
+  {
+    schedule: "0 8 * * *",
+    timeZone: "America/Denver",
+    secrets: [PODIUM_API_KEY],
+  },
+  async () => {
+    const result = await syncContacts(PODIUM_API_KEY.value(), 25);
+    console.log("Scheduled sync complete:", JSON.stringify(result.stats));
+  }
+);
+
+/**
+ * HTTP trigger — POST only. Accepts optional { lookbackHours } in body.
+ */
+exports.podiumContactSyncManual = onRequest(
+  {
+    secrets: [PODIUM_API_KEY],
+  },
+  async (req, res) => {
+    if (req.method !== "POST") {
+      res.status(405).json({ error: "Method not allowed. Use POST." });
+      return;
+    }
+
+    const lookbackHours = req.body?.lookbackHours || 25;
+
+    try {
+      const result = await syncContacts(PODIUM_API_KEY.value(), lookbackHours);
+      res.status(200).json({
+        success: true,
+        stats: result.stats,
+        changelogCount: result.changelogEntriesWritten,
+      });
+    } catch (err) {
+      console.error("Manual sync failed:", err.message);
+      res.status(500).json({
+        success: false,
+        error: err.message,
+      });
+    }
+  }
+);
