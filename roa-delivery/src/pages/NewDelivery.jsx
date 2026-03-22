@@ -1,6 +1,9 @@
 import { useState } from "react";
+import { collection, addDoc } from "firebase/firestore";
+import { db } from "../firebase";
+import { CHECKLIST_TEMPLATE } from "../checklist";
 
-export default function NewDelivery({ onCreated }) {
+export default function NewDelivery({ onCreated, userEmail }) {
   const [form, setForm] = useState({
     customerName: "",
     customerPhone: "",
@@ -13,15 +16,37 @@ export default function NewDelivery({ onCreated }) {
     scheduledDate: "",
     notes: "",
   });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
 
   function update(field, value) {
     setForm((f) => ({ ...f, [field]: value }));
   }
 
-  function handleSubmit(e) {
+  async function handleSubmit(e) {
     e.preventDefault();
-    // Mockup — just navigate to a placeholder detail
-    onCreated("mock-1");
+    setSaving(true);
+    setError("");
+    try {
+      const docRef = await addDoc(collection(db, "deliveries"), {
+        ...form,
+        status: "pending",
+        checklist: CHECKLIST_TEMPLATE.map((item, i) => ({
+          id: `item-${i}`,
+          category: item.category,
+          item: item.item,
+          completed: false,
+          completedBy: null,
+          completedAt: null,
+        })),
+        createdAt: new Date().toISOString(),
+        createdBy: userEmail || null,
+      });
+      onCreated(docRef.id);
+    } catch (err) {
+      setError(err.message);
+      setSaving(false);
+    }
   }
 
   return (
@@ -88,8 +113,9 @@ export default function NewDelivery({ onCreated }) {
           </div>
         </div>
 
-        <button className="dl-btn dl-btn-primary dl-submit-btn" type="submit">
-          Create Delivery
+        {error && <div className="login-error">{error}</div>}
+        <button className="dl-btn dl-btn-primary dl-submit-btn" type="submit" disabled={saving}>
+          {saving ? "Creating..." : "Create Delivery"}
         </button>
       </form>
     </div>
