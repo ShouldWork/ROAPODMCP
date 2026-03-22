@@ -32,12 +32,6 @@
   "hosting": [
     {
       "target": "dashboard",
-      "public": "dashboard/dist",
-      "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
-      "rewrites": [{ "source": "**", "destination": "/index.html" }]
-    },
-    {
-      "target": "delivery",
       "public": "roa-delivery/dist",
       "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
       "rewrites": [{ "source": "**", "destination": "/index.html" }]
