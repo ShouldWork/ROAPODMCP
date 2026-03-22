@@ -3,11 +3,12 @@ import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager
 import { getAuth } from "firebase/auth";
 
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: "roa-support.firebaseapp.com",
-  projectId: "roa-support",
-  storageBucket: "roa-support.firebasestorage.app",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  apiKey: "AIzaSyCS9t0f6kLLBDpKkRD_O7p9XTA-ExxGgf4",
+  authDomain: "roa-delivery.firebaseapp.com",
+  projectId: "roa-delivery",
+  storageBucket: "roa-delivery.firebasestorage.app",
+  messagingSenderId: "114943741473",
+  appId: "1:114943741473:web:a55529b8d0555293591d60",
 };
 
 const app = initializeApp(firebaseConfig);
