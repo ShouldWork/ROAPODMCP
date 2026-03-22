@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { doc, onSnapshot, updateDoc } from "firebase/firestore";
+import { db } from "../firebase";
 import { CATEGORIES, STATUS_OPTIONS } from "../checklist";
-import { MOCK_DELIVERIES } from "../mockData";
 
 function fmtDate(d) {
   if (!d) return "—";
@@ -16,10 +17,23 @@ function statusInfo(key) {
   return STATUS_OPTIONS.find((s) => s.key === key) || STATUS_OPTIONS[0];
 }
 
-export default function DeliveryDetail({ id, onBack }) {
-  const found = MOCK_DELIVERIES.find((d) => d.id === id);
-  const [delivery, setDelivery] = useState(found);
+export default function DeliveryDetail({ id, onBack, userEmail }) {
+  const [delivery, setDelivery] = useState(null);
+  const [loading, setLoading] = useState(true);
 
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, "deliveries", id), (snap) => {
+      if (snap.exists()) {
+        setDelivery({ id: snap.id, ...snap.data() });
+      } else {
+        setDelivery(null);
+      }
+      setLoading(false);
+    });
+    return unsub;
+  }, [id]);
+
+  if (loading) return <div className="dl-loading">Loading delivery...</div>;
   if (!delivery) return <div className="dl-loading">Delivery not found.</div>;
 
   const checklist = delivery.checklist || [];
@@ -35,21 +49,21 @@ export default function DeliveryDetail({ id, onBack }) {
     grouped[item.category].push(item);
   }
 
-  function toggleItem(itemId) {
-    const newChecklist = delivery.checklist.map((c) => {
+  async function toggleItem(itemId) {
+    const newChecklist = checklist.map((c) => {
       if (c.id !== itemId) return c;
       return {
         ...c,
         completed: !c.completed,
-        completedBy: !c.completed ? "demo@roa-rv.com" : null,
+        completedBy: !c.completed ? (userEmail || "unknown") : null,
         completedAt: !c.completed ? new Date().toISOString() : null,
       };
     });
-    setDelivery({ ...delivery, checklist: newChecklist });
+    await updateDoc(doc(db, "deliveries", id), { checklist: newChecklist });
   }
 
-  function updateStatus(newStatus) {
-    setDelivery({ ...delivery, status: newStatus });
+  async function updateStatus(newStatus) {
+    await updateDoc(doc(db, "deliveries", id), { status: newStatus });
   }
 
   return (

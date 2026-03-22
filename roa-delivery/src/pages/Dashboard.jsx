@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { collection, onSnapshot, query, orderBy } from "firebase/firestore";
+import { db } from "../firebase";
 import { STATUS_OPTIONS } from "../checklist";
-import { MOCK_DELIVERIES } from "../mockData";
 
 function statusInfo(key) {
   return STATUS_OPTIONS.find((s) => s.key === key) || STATUS_OPTIONS[0];
@@ -16,9 +17,27 @@ function fmtDate(d) {
   return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
+function todayStr() {
+  const d = new Date();
+  return d.toISOString().slice(0, 10);
+}
+
 export default function Dashboard({ onOpen }) {
   const [filter, setFilter] = useState("all");
-  const deliveries = MOCK_DELIVERIES;
+  const [deliveries, setDeliveries] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const q = query(collection(db, "deliveries"), orderBy("createdAt", "desc"));
+    const unsub = onSnapshot(q, (snap) => {
+      const docs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      setDeliveries(docs);
+      setLoading(false);
+    });
+    return unsub;
+  }, []);
+
+  if (loading) return <div className="dl-loading">Loading deliveries...</div>;
 
   // Stats
   const pending = deliveries.filter((d) => d.status === "pending").length;
@@ -28,6 +47,8 @@ export default function Dashboard({ onOpen }) {
   const avgProgress = deliveries.length > 0
     ? Math.round(deliveries.reduce((s, d) => s + progressPct(d.checklist), 0) / deliveries.length)
     : 0;
+  const today = todayStr();
+  const dueToday = deliveries.filter((d) => d.scheduledDate === today && d.status !== "completed").length;
 
   // Filter
   const filtered = filter === "all"
@@ -41,7 +62,7 @@ export default function Dashboard({ onOpen }) {
       {/* Hero */}
       <div className="dl-hero">
         <div>
-          <h1 className="dl-title">Welcome Back, Mike.</h1>
+          <h1 className="dl-title">Delivery Dashboard</h1>
           <p className="dl-subtitle">Track prep, inspections, and customer walkthroughs for every unit.</p>
         </div>
         <div className="dl-hero-stats">
@@ -56,7 +77,7 @@ export default function Dashboard({ onOpen }) {
             <span className="dl-score-label">Total Units</span>
           </div>
           <div className="dl-score">
-            <span className="dl-score-value">2</span>
+            <span className="dl-score-value">{dueToday}</span>
             <span className="dl-score-max"></span>
             <span className="dl-score-label">Due Today</span>
           </div>
@@ -119,7 +140,7 @@ export default function Dashboard({ onOpen }) {
               <span className="dl-qs-label">Avg Progress</span>
             </div>
             <div className="dl-quick-stat">
-              <span className="dl-qs-num">2</span>
+              <span className="dl-qs-num">{dueToday}</span>
               <span className="dl-qs-label">Due Today</span>
             </div>
           </div>
