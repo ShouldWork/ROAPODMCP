@@ -80,7 +80,6 @@ async function fetchAllContacts(accessToken, updatedAfter) {
 
   do {
     const params = {
-      locationUid: LOCATION_UID,
       limit: 100,
       updatedAfter,
     };

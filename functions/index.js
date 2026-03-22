@@ -159,7 +159,6 @@ async function fetchAllContactsForSync(accessToken, updatedAfter) {
 
   do {
     const params = {
-      locationUid: CONTACT_SYNC_LOCATION_UID,
       limit: 100,
       updatedAfter,
     };
