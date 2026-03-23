@@ -33,6 +33,9 @@ export default function Dashboard({ onOpen }) {
       const docs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       setDeliveries(docs);
       setLoading(false);
+    }, (err) => {
+      console.error("Firestore snapshot error:", err);
+      setLoading(false);
     });
     return unsub;
   }, []);
