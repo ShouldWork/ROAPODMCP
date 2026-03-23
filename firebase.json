@@ -32,7 +32,7 @@
   "hosting": [
     {
       "target": "dashboard",
-      "public": "dashboard/dist",
+      "public": "roa-delivery/dist",
       "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
       "rewrites": [{ "source": "**", "destination": "/index.html" }]
     }
