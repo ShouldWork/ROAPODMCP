@@ -53,8 +53,9 @@ export default function Conversations() {
   async function loadThread(conv) {
     setSelected(conv);
     setMsgLoading(true);
+    const convUid = conv.uid || conv.id;
     const snap = await getDocs(
-      query(collection(db, "podium_messages"), where("conversationUid", "==", conv.uid), orderBy("createdAt", "asc"), limit(200))
+      query(collection(db, "podium_messages"), where("conversationUid", "==", convUid), orderBy("createdAt", "asc"), limit(200))
     );
     setMessages(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
     setMsgLoading(false);
@@ -109,7 +110,7 @@ export default function Conversations() {
                   <tr key={c.id} onClick={() => loadThread(c)} style={{ background: selected?.id === c.id ? "#e8e8e8" : undefined }}>
                     <td>
                       <strong>{c.contactName || "Unknown"}</strong>
-                      <div style={{ fontSize: 11, color: "#787878" }}>{c.phone || ""}</div>
+                      <div style={{ fontSize: 11, color: "#8B7355" }}>{c.phone || ""}</div>
                     </td>
                     <td><span className={`status-badge ${c.status}`}>{c.status || "—"}</span></td>
                     <td style={{ fontSize: 13 }}>{users[c.assignedUserUid] || "Unassigned"}</td>
@@ -124,7 +125,7 @@ export default function Conversations() {
         {/* Right column — Message thread */}
         <div className="conv-thread">
           {!selected ? (
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "#787878", fontSize: 15 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "#8B7355", fontSize: 15 }}>
               No conversation selected
             </div>
           ) : (
@@ -151,7 +152,7 @@ export default function Conversations() {
                       </div>
                     ))}
                     {messages.length === 0 && !msgLoading && (
-                      <div style={{ textAlign: "center", color: "#787878", padding: 20 }}>No messages found. Messages may not be backfilled yet.</div>
+                      <div style={{ textAlign: "center", color: "#8B7355", padding: 20 }}>No messages found. Messages may not be backfilled yet.</div>
                     )}
                     <div ref={threadEndRef} />
                   </>

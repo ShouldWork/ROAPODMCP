@@ -49,7 +49,7 @@ export default function Users() {
   return (
     <>
       <h2>User Management</h2>
-      <p style={{ marginBottom: 16, color: "#787878" }}>
+      <p style={{ marginBottom: 16, color: "#8B7355" }}>
         Assign dashboard roles to Podium users. These roles are used for filtering across all tabs.
       </p>
 
@@ -82,7 +82,7 @@ export default function Users() {
               <tr key={u.id}>
                 <td><strong>{u.name || "Unknown"}</strong></td>
                 <td>{u.email || "—"}</td>
-                <td style={{ color: "#787878", fontSize: 13 }}>{u.role || "—"}</td>
+                <td style={{ color: "#8B7355", fontSize: 13 }}>{u.role || "—"}</td>
                 <td>
                   <select
                     value={u.dashboardRole || ""}
@@ -90,7 +90,7 @@ export default function Users() {
                     disabled={saving === u.id}
                     style={{
                       padding: "4px 8px",
-                      border: "1px solid #C8C8C8",
+                      border: "1px solid #C4A882",
                       borderRadius: 4,
                       fontSize: 13,
                       background: saving === u.id ? "#f0f0f0" : "#fff",

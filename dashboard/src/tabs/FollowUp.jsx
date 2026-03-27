@@ -21,36 +21,37 @@ export default function FollowUp() {
 
   useEffect(() => {
     async function load() {
-      // Load users
       const userSnap = await getDocs(collection(db, "podium_users"));
       const userMap = {};
       userSnap.forEach((d) => { userMap[d.id] = d.data(); });
       setUsers(userMap);
 
-      // Get open conversations
       const convSnap = await getDocs(
         query(collection(db, "podium_conversations"), where("status", "==", "open"), orderBy("lastItemAt", "desc"), limit(200))
       );
       const convos = convSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
 
-      // For each, get the most recent message to check direction
+      // Check last message direction in parallel batches of 20
       const needsFollowUp = [];
-      for (const conv of convos) {
-        const msgSnap = await getDocs(
-          query(collection(db, "podium_messages"), where("conversationUid", "==", conv.uid), orderBy("createdAt", "desc"), limit(1))
+      const BATCH_SIZE = 20;
+      for (let i = 0; i < convos.length; i += BATCH_SIZE) {
+        const batch = convos.slice(i, i + BATCH_SIZE);
+        const results = await Promise.all(
+          batch.map(async (conv) => {
+            const msgSnap = await getDocs(
+              query(collection(db, "podium_messages"), where("conversationUid", "==", conv.uid), orderBy("createdAt", "desc"), limit(1))
+            );
+            if (msgSnap.empty) return null;
+            const lastMsg = msgSnap.docs[0].data();
+            if (lastMsg.direction === "inbound") {
+              return { ...conv, lastInboundAt: lastMsg.createdAt, waitHours: hoursAgo(lastMsg.createdAt) };
+            }
+            return null;
+          })
         );
-        if (msgSnap.empty) continue;
-        const lastMsg = msgSnap.docs[0].data();
-        if (lastMsg.direction === "inbound") {
-          needsFollowUp.push({
-            ...conv,
-            lastInboundAt: lastMsg.createdAt,
-            waitHours: hoursAgo(lastMsg.createdAt),
-          });
-        }
+        needsFollowUp.push(...results.filter(Boolean));
       }
 
-      // Sort by longest wait first
       needsFollowUp.sort((a, b) => b.waitHours - a.waitHours);
       setItems(needsFollowUp);
       setLoading(false);
@@ -60,7 +61,6 @@ export default function FollowUp() {
 
   if (loading) return <div className="loading">Analyzing follow-up priorities...</div>;
 
-  // Group by coach
   const grouped = {};
   for (const item of items) {
     const coachUid = item.assignedUserUid || "unassigned";
@@ -72,7 +72,7 @@ export default function FollowUp() {
   return (
     <>
       <h2>Follow-Up Priority</h2>
-      <p style={{ marginBottom: 20, color: "#787878" }}>
+      <p style={{ marginBottom: 20, color: "var(--gray)" }}>
         Open conversations where the last message was inbound and no Sales Coach has responded yet.
         Sorted by longest wait first.
       </p>
@@ -94,7 +94,7 @@ export default function FollowUp() {
                   <tr key={c.id}>
                     <td><strong>{c.contactName || "Unknown"}</strong></td>
                     <td>{c.phone || "—"}</td>
-                    <td style={{ color: c.waitHours > 24 ? "#c00" : c.waitHours > 4 ? "#c80" : "#333", fontWeight: 600 }}>
+                    <td style={{ color: c.waitHours > 24 ? "var(--danger)" : c.waitHours > 4 ? "var(--accent)" : "var(--dark)", fontWeight: 600 }}>
                       {fmtWait(c.waitHours)}
                     </td>
                     <td>{c.channelType || "—"}</td>

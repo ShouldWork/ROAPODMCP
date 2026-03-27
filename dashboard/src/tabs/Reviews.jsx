@@ -11,28 +11,34 @@ function fmtDate(ts) {
 function RatingBar({ label, count, total }) {
   const pct = total > 0 ? Math.round((count / total) * 100) : 0;
   return (
-    <div className="rv-dist-row">
-      <span className="rv-dist-label">{label}</span>
-      <div className="rv-dist-track">
-        <div className="rv-dist-fill" style={{ width: `${pct}%` }} />
+    <div className="rating-bar">
+      <span className="rating-bar-label">{label}</span>
+      <div className="rating-bar-track">
+        <div className="rating-bar-fill" style={{ width: `${pct}%` }} />
       </div>
-      <span className="rv-dist-pct">{pct}%</span>
+      <span className="rating-bar-pct">{pct}%</span>
     </div>
   );
 }
 
+function ratingStyles(rating) {
+  if (rating >= 4) return { bg: "var(--accent-soft)", color: "var(--accent)" };
+  if (rating >= 3) return { bg: "rgba(184, 120, 0, 0.1)", color: "#b87800" };
+  return { bg: "var(--danger-soft)", color: "var(--danger)" };
+}
+
 function ReviewRow({ review }) {
-  const ratingColor = review.rating >= 4 ? "#7c5ce0" : review.rating >= 3 ? "#e0a030" : "#e05c5c";
+  const rs = ratingStyles(review.rating);
   return (
     <tr>
       <td><strong>{review.contactName || "Anonymous"}</strong></td>
       <td>
-        <span className="rv-rating-pill" style={{ background: ratingColor + "18", color: ratingColor }}>
+        <span className="rating-pill" style={{ background: rs.bg, color: rs.color }}>
           {"★".repeat(review.rating || 0)} {review.rating || 0}
         </span>
       </td>
-      <td><span className="rv-source-pill">{review.source || "—"}</span></td>
-      <td className="rv-date-cell">{fmtDate(review.createdAt)}</td>
+      <td><span className="source-pill">{review.source || "—"}</span></td>
+      <td style={{ fontSize: 12, color: "var(--gray)" }}>{fmtDate(review.createdAt)}</td>
     </tr>
   );
 }
@@ -41,35 +47,35 @@ function ResponseCard({ review }) {
   const [expanded, setExpanded] = useState(false);
   const body = review.body || "";
   const truncated = body.length > 120 && !expanded;
-  const ratingColor = review.rating >= 4 ? "#7c5ce0" : review.rating >= 3 ? "#e0a030" : "#e05c5c";
+  const rs = ratingStyles(review.rating);
 
   return (
-    <div className="rv-resp-card">
-      <div className="rv-resp-header">
-        <div className="rv-resp-avatar">
+    <div className="response-card">
+      <div className="response-header">
+        <div className="response-avatar">
           {(review.contactName || "A").charAt(0).toUpperCase()}
         </div>
-        <div className="rv-resp-info">
+        <div className="response-info">
           <strong>{review.contactName || "Anonymous"}</strong>
-          <span className="rv-resp-date">{fmtDate(review.createdAt)}</span>
+          <span className="response-date">{fmtDate(review.createdAt)}</span>
         </div>
-        <span className="rv-rating-pill" style={{ background: ratingColor + "18", color: ratingColor }}>
+        <span className="rating-pill" style={{ background: rs.bg, color: rs.color }}>
           {"★".repeat(review.rating || 0)}
         </span>
       </div>
       {body && (
-        <div className="rv-resp-body">
+        <div className="response-body">
           {truncated ? body.slice(0, 120) + "..." : body}
           {body.length > 120 && (
-            <button className="rv-read-more" onClick={() => setExpanded(!expanded)}>
+            <button className="read-more-btn" onClick={() => setExpanded(!expanded)}>
               {expanded ? "less" : "more"}
             </button>
           )}
         </div>
       )}
-      <div className="rv-resp-footer">
-        <span className="rv-source-pill">{review.source || "—"}</span>
-        <span className="rv-needs-badge">Needs Reply</span>
+      <div className="response-footer">
+        <span className="source-pill">{review.source || "—"}</span>
+        <span className="needs-badge">Needs Reply</span>
       </div>
     </div>
   );
@@ -119,73 +125,56 @@ export default function Reviews() {
     load();
   }, []);
 
-  if (loading) {
-    return (
-      <div className="rv-wrap">
-        <div className="loading">Loading reviews...</div>
-      </div>
-    );
-  }
+  if (loading) return <div className="loading">Loading reviews...</div>;
 
-  // Compute stats
   const rated = recent.filter((r) => r.rating);
   const avgRating = rated.length > 0
     ? (rated.reduce((s, r) => s + r.rating, 0) / rated.length).toFixed(1)
     : "—";
 
-  // Rating distribution from recent reviews
   const dist = [5, 4, 3, 2, 1].map((star) => ({
     star,
     count: recent.filter((r) => r.rating === star).length,
   }));
 
   return (
-    <div className="rv-wrap">
-      {/* ── Hero Header ─────────────────────────────────────── */}
-      <div className="rv-hero">
-        <div className="rv-hero-left">
-          <h2 className="rv-title">Customer Reviews</h2>
-          <p className="rv-subtitle">Monitor feedback and manage responses across all platforms.</p>
+    <>
+      <h2>Customer Reviews</h2>
+      <p style={{ marginBottom: 24, color: "var(--gray)" }}>
+        Monitor feedback and manage responses across all platforms.
+      </p>
+
+      <div className="stat-grid">
+        <div className="stat-card">
+          <div className="label">Avg Rating</div>
+          <div className="stat-value">{avgRating}<span style={{ fontSize: 18, color: "var(--light-gray)" }}>/5</span></div>
         </div>
-        <div className="rv-hero-stats">
-          <div className="rv-score">
-            <span className="rv-score-value">{avgRating}</span>
-            <span className="rv-score-max">/5</span>
-            <span className="rv-score-label">Avg Rating</span>
-          </div>
-          <div className="rv-score">
-            <span className="rv-score-value">{recent.length}</span>
-            <span className="rv-score-max"></span>
-            <span className="rv-score-label">Recent</span>
-          </div>
-          <div className="rv-score">
-            <span className="rv-score-value">{needsResponse.length}</span>
-            <span className="rv-score-max"></span>
-            <span className="rv-score-label">Needs Reply</span>
-          </div>
+        <div className="stat-card">
+          <div className="label">Recent Reviews</div>
+          <div className="stat-value">{recent.length}</div>
+        </div>
+        <div className="stat-card">
+          <div className="label">Needs Reply</div>
+          <div className="stat-value">{needsResponse.length}</div>
         </div>
       </div>
 
-      {/* ── Main Grid ───────────────────────────────────────── */}
-      <div className="rv-grid">
-        {/* Left column: Rating Distribution + Recent Table */}
-        <div className="rv-left">
-          {/* Rating Distribution */}
-          <div className="rv-glass-card rv-dist-card">
-            <h3 className="rv-card-title">Rating Distribution</h3>
+      <div className="reviews-grid">
+        <div className="reviews-left">
+          <div className="chart-card">
+            <h3>Rating Distribution</h3>
             {dist.map((d) => (
               <RatingBar key={d.star} label={`${d.star} Star`} count={d.count} total={recent.length} />
             ))}
           </div>
 
-          {/* Recent Reviews Table */}
-          <div className="rv-glass-card rv-table-card">
-            <h3 className="rv-card-title">Most Recent Reviews</h3>
+          <div className="chart-card">
+            <h3>Most Recent Reviews</h3>
             {recent.length === 0 ? (
               <div className="loading">No reviews found.</div>
             ) : (
               <div className="table-wrap">
-                <table className="rv-table">
+                <table>
                   <thead>
                     <tr>
                       <th>Author</th>
@@ -195,9 +184,7 @@ export default function Reviews() {
                     </tr>
                   </thead>
                   <tbody>
-                    {recent.map((r) => (
-                      <ReviewRow key={r.id} review={r} />
-                    ))}
+                    {recent.map((r) => <ReviewRow key={r.id} review={r} />)}
                   </tbody>
                 </table>
               </div>
@@ -205,25 +192,22 @@ export default function Reviews() {
           </div>
         </div>
 
-        {/* Right column: Awaiting Response */}
-        <div className="rv-right">
-          <div className="rv-glass-card rv-response-card">
-            <div className="rv-card-title-row">
-              <h3 className="rv-card-title">Awaiting Response</h3>
-              <span className="rv-count-badge">{needsResponse.length}</span>
+        <div className="reviews-right">
+          <div className="chart-card">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <h3 style={{ marginBottom: 0 }}>Awaiting Response</h3>
+              <span className="count-badge">{needsResponse.length}</span>
             </div>
             {needsResponse.length === 0 ? (
               <div className="loading">All reviews have been responded to.</div>
             ) : (
-              <div className="rv-resp-list">
-                {needsResponse.map((r) => (
-                  <ResponseCard key={r.id} review={r} />
-                ))}
+              <div className="response-list">
+                {needsResponse.map((r) => <ResponseCard key={r.id} review={r} />)}
               </div>
             )}
           </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }

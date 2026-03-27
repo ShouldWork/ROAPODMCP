@@ -1,6 +1,5 @@
 import { useState, useEffect } from "react";
 import { collection, query, orderBy, where, getDocs, limit, Timestamp } from "firebase/firestore";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { db } from "../firebase";
 
 export default function CoachWorkload() {
@@ -98,16 +97,31 @@ export default function CoachWorkload() {
       </div>
 
       {weeklyMessages.length > 0 && (
-        <div className="chart-card" style={{ maxWidth: 600 }}>
+        <div className="chart-card" style={{ maxWidth: 700 }}>
           <h3>Outbound Messages (Last 4 Weeks)</h3>
-          <ResponsiveContainer width="100%" height={250}>
-            <BarChart data={weeklyMessages} layout="vertical" margin={{ left: 100 }}>
-              <XAxis type="number" />
-              <YAxis type="category" dataKey="name" width={100} tick={{ fontSize: 12 }} />
-              <Tooltip />
-              <Bar dataKey="messages" fill="#1A1A1A" radius={[0, 4, 4, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {(() => {
+              const max = Math.max(...weeklyMessages.map((w) => w.messages));
+              return weeklyMessages.map((w) => (
+                <div key={w.name} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <span style={{ minWidth: 120, fontSize: 13, fontWeight: 600, textAlign: "right", color: "var(--dark)" }}>
+                    {w.name}
+                  </span>
+                  <div style={{ flex: 1, background: "var(--off-white)", borderRadius: 4, height: 24, overflow: "hidden" }}>
+                    <div style={{
+                      width: `${Math.max((w.messages / max) * 100, 2)}%`,
+                      height: "100%",
+                      background: "var(--accent)",
+                      borderRadius: 4,
+                    }} />
+                  </div>
+                  <span style={{ minWidth: 40, fontSize: 14, fontWeight: 700, fontFamily: "Rajdhani, sans-serif", color: "var(--dark)" }}>
+                    {w.messages}
+                  </span>
+                </div>
+              ));
+            })()}
+          </div>
         </div>
       )}
     </>

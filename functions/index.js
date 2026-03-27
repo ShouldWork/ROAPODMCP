@@ -2,6 +2,7 @@ const { onRequest } = require("firebase-functions/https");
 const { defineSecret } = require("firebase-functions/params");
 const { initializeApp } = require("firebase-admin/app");
 const { getFirestore, FieldValue } = require("firebase-admin/firestore");
+const { getAuth } = require("firebase-admin/auth");
 const axios = require("axios");
 const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
 const { StreamableHTTPServerTransport } = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
@@ -16,6 +17,7 @@ const PODIUM_CLIENT_SECRET = defineSecret("PODIUM_CLIENT_SECRET");
 const PODIUM_REDIRECT_URI = defineSecret("PODIUM_REDIRECT_URI");
 const MCP_API_KEY = defineSecret("MCP_API_KEY");
 const PODIUM_WEBHOOK_SECRET = defineSecret("PODIUM_WEBHOOK_SECRET");
+const ANTHROPIC_API_KEY = defineSecret("ANTHROPIC_API_KEY");
 
 // ── Constants ──────────────────────────────────────────────────────────────
 const PODIUM_AUTH_URL = "https://api.podium.com/oauth/authorize";
@@ -36,6 +38,22 @@ const SCOPES = [
 const CONTACT_SYNC_LOCATION_UID = "a79838e3-8d84-5dcf-9846-a7e6d0fbdd55";
 const PODIUM_CONTACTS_URL = "https://api.podium.com/v4/contacts";
 const CONTACT_SYNC_TRACKED_FIELDS = ["name", "phone", "email"];
+
+// ── Cached user map (avoids re-reading podium_users on every MCP call) ────
+let _userCache = null;
+let _userCacheExpiry = 0;
+const USER_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+async function getCachedUserMap() {
+  if (_userCache && Date.now() < _userCacheExpiry) return _userCache;
+  const db = getFirestore();
+  const snap = await db.collection("podium_users").get();
+  const map = {};
+  snap.forEach((d) => { map[d.id] = d.data(); });
+  _userCache = map;
+  _userCacheExpiry = Date.now() + USER_CACHE_TTL_MS;
+  return map;
+}
 
 // ── Token helpers ──────────────────────────────────────────────────────────
 
@@ -156,9 +174,11 @@ function fail(err) {
 const CONTACT_SYNC_MAX_PAGES = 5; // 500 contacts per invocation — keeps runtime under 60s
 
 function extractContactFields(contact) {
+  const name = contact.name || null;
   return {
     uid: contact.uid || null,
-    name: contact.name || null,
+    name,
+    contactNameLower: name ? name.toLowerCase() : null,
     phone: contact.phoneNumbers?.[0]?.number ?? contact.phone ?? null,
     email: contact.emails?.[0]?.address ?? contact.email ?? null,
     updatedAt: contact.updatedAt || null,
@@ -374,10 +394,12 @@ function createMcpServer(accessToken) {
         const closed = closedSnap.data().count;
 
         // Coach assignment breakdown for open conversations
-        const openConvSnap = await convRef.where("status", "==", "open").get();
-        const userSnap = await db.collection("podium_users").get();
+        const [openConvSnap, fullUserMap] = await Promise.all([
+          convRef.where("status", "==", "open").get(),
+          getCachedUserMap(),
+        ]);
         const userMap = {};
-        userSnap.forEach((d) => { const u = d.data(); userMap[d.id] = { name: u.name, role: u.dashboardRole }; });
+        for (const [id, u] of Object.entries(fullUserMap)) { userMap[id] = { name: u.name, role: u.dashboardRole }; }
 
         const byCoach = {};
         let unassigned = 0;
@@ -420,39 +442,54 @@ function createMcpServer(accessToken) {
         // Resolve assignedName to UID if provided
         let resolvedUid = assignedUserUid;
         if (assignedName && !resolvedUid) {
-          const userSnap = await db.collection("podium_users").get();
+          const users = await getCachedUserMap();
           const lowerName = assignedName.toLowerCase();
-          userSnap.forEach((d) => {
-            if ((d.data().name || "").toLowerCase().includes(lowerName)) {
-              resolvedUid = d.id;
+          for (const [id, u] of Object.entries(users)) {
+            if ((u.name || "").toLowerCase().includes(lowerName)) {
+              resolvedUid = id;
+              break;
             }
-          });
+          }
         }
 
         // Build Firestore query
-        let q = db.collection("podium_conversations").orderBy("lastItemAt", "desc");
-        if (status) q = q.where("status", "==", status);
-        if (resolvedUid) q = q.where("assignedUserUid", "==", resolvedUid);
+        // Use server-side prefix query on contactNameLower when possible
+        const hasDateRange = !!(staleAfterDays || activeWithinDays);
+        const useNamePrefix = contactName && contactName.length >= 2 && !hasDateRange;
 
-        // Date filters
-        if (staleAfterDays) {
-          const cutoff = new Date(Date.now() - staleAfterDays * 86400000);
-          q = q.where("lastItemAt", "<", cutoff);
-        }
-        if (activeWithinDays) {
-          const cutoff = new Date(Date.now() - activeWithinDays * 86400000);
-          q = q.where("lastItemAt", ">", cutoff);
+        let q;
+        if (useNamePrefix) {
+          const prefix = contactName.toLowerCase();
+          q = db.collection("podium_conversations")
+            .where("contactNameLower", ">=", prefix)
+            .where("contactNameLower", "<=", prefix + "\uffff")
+            .orderBy("contactNameLower");
+          if (status) q = q.where("status", "==", status);
+          if (resolvedUid) q = q.where("assignedUserUid", "==", resolvedUid);
+        } else {
+          q = db.collection("podium_conversations").orderBy("lastItemAt", "desc");
+          if (status) q = q.where("status", "==", status);
+          if (resolvedUid) q = q.where("assignedUserUid", "==", resolvedUid);
+          if (staleAfterDays) {
+            const cutoff = new Date(Date.now() - staleAfterDays * 86400000);
+            q = q.where("lastItemAt", "<", cutoff);
+          }
+          if (activeWithinDays) {
+            const cutoff = new Date(Date.now() - activeWithinDays * 86400000);
+            q = q.where("lastItemAt", ">", cutoff);
+          }
         }
 
         // Fetch more than needed if we're filtering client-side
-        const fetchLimit = (contactName || phone || email) ? Math.min(cap * 5, 2000) : cap;
+        const needsClientFilter = (!useNamePrefix && contactName) || phone || email;
+        const fetchLimit = needsClientFilter ? Math.min(cap * 5, 2000) : cap;
         q = q.limit(fetchLimit);
 
         const snap = await q.get();
         let results = snap.docs.map((d) => ({ uid: d.id, ...d.data() }));
 
-        // Client-side name/phone search
-        if (contactName) {
+        // Client-side name filter only needed when prefix query wasn't used
+        if (contactName && !useNamePrefix) {
           const lower = contactName.toLowerCase();
           results = results.filter((c) => (c.contactName || "").toLowerCase().includes(lower));
         }
@@ -467,13 +504,11 @@ function createMcpServer(accessToken) {
         results = results.slice(0, cap);
 
         // Resolve user names
-        const userSnap = await db.collection("podium_users").get();
-        const userMap = {};
-        userSnap.forEach((d) => { userMap[d.id] = d.data().name; });
+        const userMap = await getCachedUserMap();
 
         results = results.map((c) => ({
           ...c,
-          assignedUserName: userMap[c.assignedUserUid] || "Unassigned",
+          assignedUserName: userMap[c.assignedUserUid]?.name || "Unassigned",
           lastItemAt: c.lastItemAt?.toDate?.()?.toISOString() || c.lastItemAt,
           createdAt: c.createdAt?.toDate?.()?.toISOString() || c.createdAt,
         }));
@@ -499,16 +534,13 @@ function createMcpServer(accessToken) {
         if (direction) q = q.where("direction", "==", direction);
         q = q.limit(maxResults || 200);
 
-        const snap = await q.get();
-        const userSnap = await db.collection("podium_users").get();
-        const userMap = {};
-        userSnap.forEach((d) => { userMap[d.id] = d.data().name; });
+        const [snap, userMap] = await Promise.all([q.get(), getCachedUserMap()]);
 
         const messages = snap.docs.map((d) => {
           const m = d.data();
           return {
             ...m,
-            senderName: userMap[m.senderUid] || (m.direction === "inbound" ? m.contactName : "System"),
+            senderName: userMap[m.senderUid]?.name || (m.direction === "inbound" ? m.contactName : "System"),
             createdAt: m.createdAt?.toDate?.()?.toISOString() || m.createdAt,
           };
         });
@@ -532,11 +564,22 @@ function createMcpServer(accessToken) {
         const results = [];
         const seen = new Set();
 
-        // Search conversations
-        const convSnap = await db.collection("podium_conversations")
-          .orderBy("lastItemAt", "desc")
-          .limit(2000)
-          .get();
+        // Search conversations — use server-side prefix query for name searches
+        const isPhoneSearch = /^\+?\d[\d\s\-()]+$/.test(searchTerm);
+        let convSnap;
+        if (!isPhoneSearch && lower.length >= 2) {
+          convSnap = await db.collection("podium_conversations")
+            .where("contactNameLower", ">=", lower)
+            .where("contactNameLower", "<=", lower + "\uffff")
+            .orderBy("contactNameLower")
+            .limit(200)
+            .get();
+        } else {
+          convSnap = await db.collection("podium_conversations")
+            .orderBy("lastItemAt", "desc")
+            .limit(2000)
+            .get();
+        }
         convSnap.forEach((d) => {
           const c = d.data();
           const name = (c.contactName || "").toLowerCase();
@@ -561,8 +604,20 @@ function createMcpServer(accessToken) {
           }
         });
 
-        // Search contacts collection
-        const contactSnap = await db.collection("podium_contacts").limit(1000).get();
+        // Search contacts collection — use server-side prefix query on contactNameLower when searching by name
+        let contactSnap;
+        if (!isPhoneSearch && lower.length >= 2) {
+          // Prefix range query: "abc" matches "abc" through "abc\uffff"
+          contactSnap = await db.collection("podium_contacts")
+            .where("contactNameLower", ">=", lower)
+            .where("contactNameLower", "<=", lower + "\uffff")
+            .orderBy("contactNameLower")
+            .limit(200)
+            .get();
+        } else {
+          // Phone/email search or very short query — fall back to broader scan
+          contactSnap = await db.collection("podium_contacts").limit(1000).get();
+        }
         contactSnap.forEach((d) => {
           const c = d.data();
           const name = (c.name || "").toLowerCase();
@@ -594,20 +649,17 @@ function createMcpServer(accessToken) {
     {},
     async () => {
       try {
-        const snap = await db.collection("podium_users").get();
-        const users = snap.docs.map((d) => {
-          const u = d.data();
-          return {
-            uid: d.id,
-            name: u.name,
-            email: u.email,
-            phone: u.phone,
-            podiumRole: u.role,
-            dashboardRole: u.dashboardRole || "Unset",
-            locations: u.locations || [],
-            active: u.active !== false,
-          };
-        }).sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+        const cached = await getCachedUserMap();
+        const users = Object.entries(cached).map(([id, u]) => ({
+          uid: id,
+          name: u.name,
+          email: u.email,
+          phone: u.phone,
+          podiumRole: u.role,
+          dashboardRole: u.dashboardRole || "Unset",
+          locations: u.locations || [],
+          active: u.active !== false,
+        })).sort((a, b) => (a.name || "").localeCompare(b.name || ""));
         return ok({ data: users, count: users.length });
       } catch (err) { return fail(err); }
     }
@@ -628,22 +680,27 @@ function createMcpServer(accessToken) {
           .limit(cap)
           .get();
 
-        const userSnap = await db.collection("podium_users").get();
-        const userMap = {};
-        userSnap.forEach((d) => { userMap[d.id] = d.data(); });
+        const userMap = await getCachedUserMap();
 
         const needsFollowUp = [];
         for (const doc of convSnap.docs) {
           const conv = doc.data();
-          const msgSnap = await db.collection("podium_messages")
-            .where("conversationUid", "==", doc.id)
-            .orderBy("createdAt", "desc")
-            .limit(1)
-            .get();
-          if (msgSnap.empty) continue;
-          const lastMsg = msgSnap.docs[0].data();
-          if (lastMsg.direction === "inbound") {
-            const lastMsgTime = lastMsg.createdAt?.toDate?.() || new Date(lastMsg.createdAt);
+          // Use denormalized lastMessageDirection when available (fast path)
+          // Fall back to querying last message (slow path, for pre-backfill data)
+          let direction = conv.lastMessageDirection;
+          let lastMsgTime = conv.lastMessageAt?.toDate?.() || null;
+          if (!direction) {
+            const msgSnap = await db.collection("podium_messages")
+              .where("conversationUid", "==", doc.id)
+              .orderBy("createdAt", "desc")
+              .limit(1)
+              .get();
+            if (msgSnap.empty) continue;
+            const lastMsg = msgSnap.docs[0].data();
+            direction = lastMsg.direction;
+            lastMsgTime = lastMsg.createdAt?.toDate?.() || new Date(lastMsg.createdAt);
+          }
+          if (direction === "inbound" && lastMsgTime) {
             const waitHours = (Date.now() - lastMsgTime.getTime()) / 3600000;
             needsFollowUp.push({
               uid: doc.id,
@@ -670,13 +727,10 @@ function createMcpServer(accessToken) {
     {},
     async () => {
       try {
-        const convSnap = await db.collection("podium_conversations")
-          .where("status", "==", "open")
-          .get();
-
-        const userSnap = await db.collection("podium_users").get();
-        const userMap = {};
-        userSnap.forEach((d) => { userMap[d.id] = d.data(); });
+        const [convSnap, userMap] = await Promise.all([
+          db.collection("podium_conversations").where("status", "==", "open").get(),
+          getCachedUserMap(),
+        ]);
 
         const now = Date.now();
         const d7 = now - 7 * 86400000;
@@ -1362,27 +1416,37 @@ exports.podiumWebhook = onRequest(
     try {
       // message.sent = outbound, message.received = inbound
       if ((eventType === "message.sent" || eventType === "message.received") && data.uid) {
+        // Podium message webhooks nest related objects: conversation.uid, contact.uid, location.uid
+        const convUid = data.conversationUid || data.conversation?.uid || null;
+        const contUid = data.contactUid || data.contact?.uid || null;
+        const locUid = data.locationUid || data.location?.uid || data.organization?.uid || null;
+        const contName = data.contactName || data.contact?.name || null;
+        const sndUid = data.senderUid || data.sender?.uid || null;
+
         await db.collection("podium_messages").doc(data.uid).set({
           uid: data.uid,
-          conversationUid: data.conversationUid || null,
-          contactName: data.contactName || null,
-          contactUid: data.contactUid || null,
+          conversationUid: convUid,
+          contactName: contName,
+          contactUid: contUid,
           body: data.body || null,
           direction: eventType === "message.received" ? "inbound" : "outbound",
-          senderUid: data.senderUid || null,
+          senderUid: sndUid,
           deliveryStatus: data.deliveryStatus || null,
           messageType: data.messageType || null,
           hasAttachment: !!(data.attachments && data.attachments.length > 0),
           attachmentType: data.attachments?.[0]?.type || null,
-          locationUid: data.locationUid || data.organization?.uid || null,
+          locationUid: locUid,
           createdAt: data.createdAt ? new Date(data.createdAt) : null,
           _ingestedAt: new Date(),
         }, { merge: true });
 
-        // Update parent conversation's lastItemAt
-        if (data.conversationUid) {
-          await db.collection("podium_conversations").doc(data.conversationUid).set({
-            lastItemAt: data.createdAt ? new Date(data.createdAt) : new Date(),
+        // Update parent conversation's lastItemAt + denormalized last message info
+        if (convUid) {
+          const msgTime = data.createdAt ? new Date(data.createdAt) : new Date();
+          await db.collection("podium_conversations").doc(convUid).set({
+            lastItemAt: msgTime,
+            lastMessageDirection: eventType === "message.received" ? "inbound" : "outbound",
+            lastMessageAt: msgTime,
             _ingestedAt: new Date(),
           }, { merge: true });
         }
@@ -1392,6 +1456,7 @@ exports.podiumWebhook = onRequest(
         await db.collection("podium_contacts").doc(data.uid).set({
           uid: data.uid,
           name: data.name || null,
+          contactNameLower: data.name ? data.name.toLowerCase() : null,
           phone: data.phoneNumbers?.[0] || null,
           email: data.emails?.[0] || null,
           locationUid: data.locations?.[0]?.uid || null,
@@ -1401,15 +1466,19 @@ exports.podiumWebhook = onRequest(
         }, { merge: true });
       }
 
-      if (eventType === "review.created" && data.uid) {
+      if (eventType === "contact.deleted" && data.uid) {
+        await db.collection("podium_contacts").doc(data.uid).delete();
+      }
+
+      if ((eventType === "review.created" || eventType === "review.updated") && data.uid) {
         await db.collection("podium_reviews").doc(data.uid).set({
           uid: data.uid,
           contactName: data.author?.name || null,
-          contactUid: data.contactUid || null,
+          contactUid: data.contactUid || data.contact?.uid || null,
           rating: data.review?.rating || data.rating || null,
           body: data.review?.body || data.body || null,
           source: data.review?.source || data.platform || null,
-          locationUid: data.locationUid || null,
+          locationUid: data.locationUid || data.location?.uid || null,
           needsResponse: data.needsResponse !== undefined ? data.needsResponse : true,
           responseCount: data.responses?.length || 0,
           createdAt: data.createdAt ? new Date(data.createdAt) : null,
@@ -1417,15 +1486,15 @@ exports.podiumWebhook = onRequest(
         }, { merge: true });
       }
 
-      if ((eventType === "invoice.created" || eventType === "invoice.updated") && data.uid) {
+      if (eventType.startsWith("invoice.") && data.uid) {
         await db.collection("podium_invoices").doc(data.uid).set({
           uid: data.uid,
-          contactName: data.contactName || null,
-          contactUid: data.contactUid || null,
+          contactName: data.contactName || data.contact?.name || null,
+          contactUid: data.contactUid || data.contact?.uid || null,
           amountCents: data.amountCents || data.amount || null,
           status: data.status || null,
-          conversationUid: data.conversationUid || null,
-          locationUid: data.locationUid || null,
+          conversationUid: data.conversationUid || data.conversation?.uid || null,
+          locationUid: data.locationUid || data.location?.uid || null,
           createdAt: data.createdAt ? new Date(data.createdAt) : null,
           updatedAt: data.updatedAt ? new Date(data.updatedAt) : null,
           _ingestedAt: new Date(),
@@ -1437,6 +1506,82 @@ exports.podiumWebhook = onRequest(
     } catch (err) {
       console.error("Webhook processing failed:", err.message);
       res.status(500).json({ error: err.message });
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════════════════
+// Dashboard AI — Claude-powered insights & chat for the dashboard
+// ══════════════════════════════════════════════════════════════════════════
+
+exports.dashboardAI = onRequest(
+  { secrets: [ANTHROPIC_API_KEY] },
+  async (req, res) => {
+    // CORS
+    res.set("Access-Control-Allow-Origin", "*");
+    res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    if (req.method === "OPTIONS") return res.status(204).send("");
+    if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+    // Verify Firebase Auth
+    const authHeader = req.headers["authorization"] || "";
+    if (!authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Missing auth token" });
+    }
+    try {
+      await getAuth().verifyIdToken(authHeader.slice(7));
+    } catch (e) {
+      return res.status(401).json({ error: "Invalid auth token" });
+    }
+
+    const { action, stats, messages } = req.body;
+    if (!action || !stats) {
+      return res.status(400).json({ error: "Missing action or stats" });
+    }
+
+    const Anthropic = require("@anthropic-ai/sdk").default;
+    const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY.value() });
+
+    const baseContext = `You are an analytics assistant for ROA Off-Road, an off-road vehicle dealership using Podium for customer messaging and lead management. You help managers understand conversation trends, coach performance, and data quality.
+
+Rules:
+- Be concise and direct
+- Use specific numbers from the data
+- Refer to customers as "Roamers" or "Future Roamers"
+- Refer to sales staff as "Sales Coaches"`;
+
+    try {
+      if (action === "insights") {
+        const response = await client.messages.create({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 600,
+          system: baseContext + "\n\nGenerate exactly 3-5 brief, actionable insights as bullet points. Each should be 1-2 sentences. Focus on what needs immediate attention: workload imbalance, stale conversations, assignment gaps, or data quality issues.",
+          messages: [{
+            role: "user",
+            content: `Current dashboard data:\n${JSON.stringify(stats, null, 2)}\n\nProvide actionable insights for a sales manager.`,
+          }],
+        });
+        return res.json({ content: response.content[0].text });
+      }
+
+      if (action === "chat") {
+        if (!messages || !messages.length) {
+          return res.status(400).json({ error: "Missing messages" });
+        }
+        const response = await client.messages.create({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 1024,
+          system: baseContext + `\n\nAnswer the user's questions based on this dashboard data:\n${JSON.stringify(stats, null, 2)}\n\nIf you cannot answer from the available data, say so clearly.`,
+          messages: messages.slice(-10), // keep last 10 turns
+        });
+        return res.json({ content: response.content[0].text });
+      }
+
+      res.status(400).json({ error: "Invalid action. Use 'insights' or 'chat'." });
+    } catch (err) {
+      console.error("Dashboard AI error:", err.message);
+      res.status(500).json({ error: "AI service temporarily unavailable" });
     }
   }
 );

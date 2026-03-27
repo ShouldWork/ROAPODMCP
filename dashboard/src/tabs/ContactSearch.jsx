@@ -66,7 +66,7 @@ export default function ContactSearch() {
   return (
     <>
       <h2>Contact Search</h2>
-      <p style={{ marginBottom: 20, color: "#787878" }}>
+      <p style={{ marginBottom: 20, color: "#8B7355" }}>
         Search for Roamers and Future Roamers by name, phone number, or email.
       </p>
       <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
@@ -106,7 +106,7 @@ export default function ContactSearch() {
                 </tr>
               ))}
               {contacts.length === 0 && (
-                <tr><td colSpan={5} style={{ textAlign: "center", color: "#787878" }}>No results found</td></tr>
+                <tr><td colSpan={5} style={{ textAlign: "center", color: "#8B7355" }}>No results found</td></tr>
               )}
             </tbody>
           </table>

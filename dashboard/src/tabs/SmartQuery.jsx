@@ -5,9 +5,9 @@ import { db } from "../firebase";
 import { getCached, setCached } from "../cache";
 
 const CHART_COLORS = [
-  "#1A1A1A", "#3A3A3A", "#555555", "#787878", "#999999",
-  "#AAAAAA", "#B0B0B0", "#C0C0C0", "#C8C8C8", "#D5D5D5",
-  "#2A2A2A", "#4A4A4A", "#6A6A6A", "#8A8A8A", "#A0A0A0",
+  "#B8860B", "#5C4033", "#8B6914", "#8B7355", "#A0522D",
+  "#C4A882", "#D2A647", "#CD853F", "#DEB887", "#D2B48C",
+  "#DAA520", "#6B4423", "#9B7B3C", "#7B5B3A", "#A68B5B",
 ];
 
 function fmtDate(ts) {
@@ -175,7 +175,7 @@ async function executeQuery(plan, users) {
 
 function ResultView({ plan, data, users }) {
   if (data.length === 0) {
-    return <div style={{ textAlign: "center", color: "#787878", padding: 40 }}>No results found.</div>;
+    return <div style={{ textAlign: "center", color: "#8B7355", padding: 40 }}>No results found.</div>;
   }
 
   // Group data if needed
@@ -230,7 +230,7 @@ function ResultView({ plan, data, users }) {
                 <span><strong>{d.name}</strong>: {d.value}</span>
               </div>
             ))}
-            <div style={{ marginTop: 8, color: "#787878" }}>Total: {data.length}</div>
+            <div style={{ marginTop: 8, color: "#8B7355" }}>Total: {data.length}</div>
           </div>
         </div>
       );
@@ -243,7 +243,7 @@ function ResultView({ plan, data, users }) {
             <XAxis type="number" />
             <YAxis type="category" dataKey="name" width={140} tick={{ fontSize: 12 }} />
             <Tooltip />
-            <Bar dataKey="value" fill="#1A1A1A" radius={[0, 4, 4, 0]} />
+            <Bar dataKey="value" fill="#B8860B" radius={[0, 4, 4, 0]} />
           </BarChart>
         </ResponsiveContainer>
       );
@@ -288,7 +288,7 @@ function ResultView({ plan, data, users }) {
         </tbody>
       </table>
       {data.length > plan.limit && (
-        <div style={{ textAlign: "center", color: "#787878", padding: 8, fontSize: 13 }}>
+        <div style={{ textAlign: "center", color: "#8B7355", padding: 8, fontSize: 13 }}>
           Showing {plan.limit} of {data.length} results
         </div>
       )}
@@ -383,7 +383,7 @@ export default function SmartQuery() {
   return (
     <>
       <h2>Smart Query</h2>
-      <p style={{ marginBottom: 12, color: "#787878" }}>
+      <p style={{ marginBottom: 12, color: "#8B7355" }}>
         Describe what you want to see in plain text. Supports pie charts, bar charts, counts, and lists with filters for status, role, coach, channel, stale conversations, and date ranges.
         <button
           onClick={() => setHelpOpen(!helpOpen)}
@@ -398,16 +398,16 @@ export default function SmartQuery() {
           <h3 style={{ fontFamily: "Rajdhani", fontSize: 16, margin: "0 0 12px", textTransform: "uppercase", letterSpacing: 1 }}>Smart Query Guide</h3>
 
           <div style={{ marginBottom: 16 }}>
-            <strong style={{ color: "#1A1A1A" }}>How It Works</strong>
+            <strong style={{ color: "#3D2B1F" }}>How It Works</strong>
             <p style={{ margin: "4px 0", color: "#555" }}>
               Type a natural language description of the data you want to see. The parser extracts keywords to determine the chart type, filters, and grouping — then runs a Firestore query and renders the results.
             </p>
           </div>
 
           <div style={{ marginBottom: 16 }}>
-            <strong style={{ color: "#1A1A1A" }}>Chart Types</strong>
+            <strong style={{ color: "#3D2B1F" }}>Chart Types</strong>
             <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 4 }}>
-              <thead><tr style={{ borderBottom: "1px solid #e0e0e0" }}><th style={{ textAlign: "left", padding: "4px 8px", color: "#787878", fontSize: 12 }}>Keyword</th><th style={{ textAlign: "left", padding: "4px 8px", color: "#787878", fontSize: 12 }}>Output</th></tr></thead>
+              <thead><tr style={{ borderBottom: "1px solid #e0d5c5" }}><th style={{ textAlign: "left", padding: "4px 8px", color: "#8B7355", fontSize: 12 }}>Keyword</th><th style={{ textAlign: "left", padding: "4px 8px", color: "#8B7355", fontSize: 12 }}>Output</th></tr></thead>
               <tbody>
                 <tr><td style={{ padding: "4px 8px" }}><code>pie chart</code></td><td style={{ padding: "4px 8px" }}>Pie chart (requires a "by" grouping)</td></tr>
                 <tr><td style={{ padding: "4px 8px" }}><code>bar chart</code></td><td style={{ padding: "4px 8px" }}>Horizontal bar chart (requires a "by" grouping)</td></tr>
@@ -418,9 +418,9 @@ export default function SmartQuery() {
           </div>
 
           <div style={{ marginBottom: 16 }}>
-            <strong style={{ color: "#1A1A1A" }}>Status Filters</strong>
+            <strong style={{ color: "#3D2B1F" }}>Status Filters</strong>
             <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 4 }}>
-              <thead><tr style={{ borderBottom: "1px solid #e0e0e0" }}><th style={{ textAlign: "left", padding: "4px 8px", color: "#787878", fontSize: 12 }}>Keyword</th><th style={{ textAlign: "left", padding: "4px 8px", color: "#787878", fontSize: 12 }}>Filter</th></tr></thead>
+              <thead><tr style={{ borderBottom: "1px solid #e0d5c5" }}><th style={{ textAlign: "left", padding: "4px 8px", color: "#8B7355", fontSize: 12 }}>Keyword</th><th style={{ textAlign: "left", padding: "4px 8px", color: "#8B7355", fontSize: 12 }}>Filter</th></tr></thead>
               <tbody>
                 <tr><td style={{ padding: "4px 8px" }}><code>open</code></td><td style={{ padding: "4px 8px" }}>Only open conversations</td></tr>
                 <tr><td style={{ padding: "4px 8px" }}><code>closed</code></td><td style={{ padding: "4px 8px" }}>Only closed conversations</td></tr>
@@ -430,9 +430,9 @@ export default function SmartQuery() {
           </div>
 
           <div style={{ marginBottom: 16 }}>
-            <strong style={{ color: "#1A1A1A" }}>Stale / Inactive</strong>
+            <strong style={{ color: "#3D2B1F" }}>Stale / Inactive</strong>
             <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 4 }}>
-              <thead><tr style={{ borderBottom: "1px solid #e0e0e0" }}><th style={{ textAlign: "left", padding: "4px 8px", color: "#787878", fontSize: 12 }}>Keyword</th><th style={{ textAlign: "left", padding: "4px 8px", color: "#787878", fontSize: 12 }}>Filter</th></tr></thead>
+              <thead><tr style={{ borderBottom: "1px solid #e0d5c5" }}><th style={{ textAlign: "left", padding: "4px 8px", color: "#8B7355", fontSize: 12 }}>Keyword</th><th style={{ textAlign: "left", padding: "4px 8px", color: "#8B7355", fontSize: 12 }}>Filter</th></tr></thead>
               <tbody>
                 <tr><td style={{ padding: "4px 8px" }}><code>stale</code></td><td style={{ padding: "4px 8px" }}>No activity for 7+ days (default)</td></tr>
                 <tr><td style={{ padding: "4px 8px" }}><code>stale 14 days</code>, <code>stale 30 days</code></td><td style={{ padding: "4px 8px" }}>No activity for specified days</td></tr>
@@ -442,10 +442,10 @@ export default function SmartQuery() {
           </div>
 
           <div style={{ marginBottom: 16 }}>
-            <strong style={{ color: "#1A1A1A" }}>Role Filters</strong>
+            <strong style={{ color: "#3D2B1F" }}>Role Filters</strong>
             <p style={{ margin: "4px 0 4px", color: "#555", fontSize: 12 }}>Filters by the dashboard role assigned in the Users tab.</p>
             <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 4 }}>
-              <thead><tr style={{ borderBottom: "1px solid #e0e0e0" }}><th style={{ textAlign: "left", padding: "4px 8px", color: "#787878", fontSize: 12 }}>Keyword</th><th style={{ textAlign: "left", padding: "4px 8px", color: "#787878", fontSize: 12 }}>Role</th></tr></thead>
+              <thead><tr style={{ borderBottom: "1px solid #e0d5c5" }}><th style={{ textAlign: "left", padding: "4px 8px", color: "#8B7355", fontSize: 12 }}>Keyword</th><th style={{ textAlign: "left", padding: "4px 8px", color: "#8B7355", fontSize: 12 }}>Role</th></tr></thead>
               <tbody>
                 <tr><td style={{ padding: "4px 8px" }}><code>sales coach</code></td><td style={{ padding: "4px 8px" }}>Sales Coach</td></tr>
                 <tr><td style={{ padding: "4px 8px" }}><code>team leader</code>, <code>leader</code></td><td style={{ padding: "4px 8px" }}>Team Leader</td></tr>
@@ -456,9 +456,9 @@ export default function SmartQuery() {
           </div>
 
           <div style={{ marginBottom: 16 }}>
-            <strong style={{ color: "#1A1A1A" }}>Grouping (required for pie/bar charts)</strong>
+            <strong style={{ color: "#3D2B1F" }}>Grouping (required for pie/bar charts)</strong>
             <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 4 }}>
-              <thead><tr style={{ borderBottom: "1px solid #e0e0e0" }}><th style={{ textAlign: "left", padding: "4px 8px", color: "#787878", fontSize: 12 }}>Keyword</th><th style={{ textAlign: "left", padding: "4px 8px", color: "#787878", fontSize: 12 }}>Groups by</th></tr></thead>
+              <thead><tr style={{ borderBottom: "1px solid #e0d5c5" }}><th style={{ textAlign: "left", padding: "4px 8px", color: "#8B7355", fontSize: 12 }}>Keyword</th><th style={{ textAlign: "left", padding: "4px 8px", color: "#8B7355", fontSize: 12 }}>Groups by</th></tr></thead>
               <tbody>
                 <tr><td style={{ padding: "4px 8px" }}><code>by coach</code>, <code>per coach</code>, <code>by user</code></td><td style={{ padding: "4px 8px" }}>Assigned user name</td></tr>
                 <tr><td style={{ padding: "4px 8px" }}><code>by role</code>, <code>per role</code></td><td style={{ padding: "4px 8px" }}>Dashboard role</td></tr>
@@ -472,9 +472,9 @@ export default function SmartQuery() {
           </div>
 
           <div style={{ marginBottom: 16 }}>
-            <strong style={{ color: "#1A1A1A" }}>Channel Filters</strong>
+            <strong style={{ color: "#3D2B1F" }}>Channel Filters</strong>
             <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 4 }}>
-              <thead><tr style={{ borderBottom: "1px solid #e0e0e0" }}><th style={{ textAlign: "left", padding: "4px 8px", color: "#787878", fontSize: 12 }}>Keyword</th><th style={{ textAlign: "left", padding: "4px 8px", color: "#787878", fontSize: 12 }}>Channel</th></tr></thead>
+              <thead><tr style={{ borderBottom: "1px solid #e0d5c5" }}><th style={{ textAlign: "left", padding: "4px 8px", color: "#8B7355", fontSize: 12 }}>Keyword</th><th style={{ textAlign: "left", padding: "4px 8px", color: "#8B7355", fontSize: 12 }}>Channel</th></tr></thead>
               <tbody>
                 <tr><td style={{ padding: "4px 8px" }}><code>phone</code>, <code>sms</code>, <code>text</code></td><td style={{ padding: "4px 8px" }}>Phone / SMS</td></tr>
                 <tr><td style={{ padding: "4px 8px" }}><code>email</code></td><td style={{ padding: "4px 8px" }}>Email</td></tr>
@@ -484,9 +484,9 @@ export default function SmartQuery() {
           </div>
 
           <div style={{ marginBottom: 16 }}>
-            <strong style={{ color: "#1A1A1A" }}>Date Ranges</strong>
+            <strong style={{ color: "#3D2B1F" }}>Date Ranges</strong>
             <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 4 }}>
-              <thead><tr style={{ borderBottom: "1px solid #e0e0e0" }}><th style={{ textAlign: "left", padding: "4px 8px", color: "#787878", fontSize: 12 }}>Keyword</th><th style={{ textAlign: "left", padding: "4px 8px", color: "#787878", fontSize: 12 }}>Range</th></tr></thead>
+              <thead><tr style={{ borderBottom: "1px solid #e0d5c5" }}><th style={{ textAlign: "left", padding: "4px 8px", color: "#8B7355", fontSize: 12 }}>Keyword</th><th style={{ textAlign: "left", padding: "4px 8px", color: "#8B7355", fontSize: 12 }}>Range</th></tr></thead>
               <tbody>
                 <tr><td style={{ padding: "4px 8px" }}><code>last 7 days</code>, <code>past 7 days</code></td><td style={{ padding: "4px 8px" }}>Last 7 days</td></tr>
                 <tr><td style={{ padding: "4px 8px" }}><code>last 30 days</code></td><td style={{ padding: "4px 8px" }}>Last 30 days</td></tr>
@@ -497,9 +497,9 @@ export default function SmartQuery() {
           </div>
 
           <div style={{ marginBottom: 16 }}>
-            <strong style={{ color: "#1A1A1A" }}>Message Direction</strong>
+            <strong style={{ color: "#3D2B1F" }}>Message Direction</strong>
             <table style={{ width: "100%", borderCollapse: "collapse", marginTop: 4 }}>
-              <thead><tr style={{ borderBottom: "1px solid #e0e0e0" }}><th style={{ textAlign: "left", padding: "4px 8px", color: "#787878", fontSize: 12 }}>Keyword</th><th style={{ textAlign: "left", padding: "4px 8px", color: "#787878", fontSize: 12 }}>Direction</th></tr></thead>
+              <thead><tr style={{ borderBottom: "1px solid #e0d5c5" }}><th style={{ textAlign: "left", padding: "4px 8px", color: "#8B7355", fontSize: 12 }}>Keyword</th><th style={{ textAlign: "left", padding: "4px 8px", color: "#8B7355", fontSize: 12 }}>Direction</th></tr></thead>
               <tbody>
                 <tr><td style={{ padding: "4px 8px" }}><code>inbound</code>, <code>received</code></td><td style={{ padding: "4px 8px" }}>Messages from customers</td></tr>
                 <tr><td style={{ padding: "4px 8px" }}><code>outbound</code>, <code>sent</code></td><td style={{ padding: "4px 8px" }}>Messages from team</td></tr>
@@ -508,7 +508,7 @@ export default function SmartQuery() {
           </div>
 
           <div style={{ marginBottom: 8 }}>
-            <strong style={{ color: "#1A1A1A" }}>Combining Filters</strong>
+            <strong style={{ color: "#3D2B1F" }}>Combining Filters</strong>
             <p style={{ margin: "4px 0", color: "#555" }}>
               You can combine any filters in a single query. The parser extracts all recognized keywords regardless of order.
             </p>
@@ -543,7 +543,7 @@ export default function SmartQuery() {
 
       {/* Example queries — always visible */}
       <div style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: 1, color: "#787878", marginBottom: 8, fontFamily: "Rajdhani" }}>
+        <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: 1, color: "#8B7355", marginBottom: 8, fontFamily: "Rajdhani" }}>
           Example Queries
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
@@ -552,7 +552,7 @@ export default function SmartQuery() {
               key={i}
               onClick={() => runQuery(ex)}
               style={{
-                background: input === ex ? "#1A1A1A" : "#f5f5f5",
+                background: input === ex ? "#1A1A1A" : "#f5ede3",
                 color: input === ex ? "#fff" : "#333",
                 border: "1px solid #ddd", borderRadius: 6,
                 padding: "6px 12px", fontSize: 13, cursor: "pointer",
@@ -566,7 +566,7 @@ export default function SmartQuery() {
       </div>
 
       {/* Results area */}
-      <div style={{ background: "#fafafa", border: "1px solid #e0e0e0", borderRadius: 10, padding: 20, minHeight: 200 }}>
+      <div style={{ background: "#fafafa", border: "1px solid #e0d5c5", borderRadius: 10, padding: 20, minHeight: 200 }}>
         {!plan && !loading && (
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 160, color: "#999", fontSize: 15 }}>
             Type a query or click an example above to get started
@@ -586,8 +586,8 @@ export default function SmartQuery() {
               {plan.channel && <span style={{ background: "#f3e5f5", color: "#7b1fa2", padding: "2px 8px", borderRadius: 4, fontSize: 12 }}>channel: {plan.channel}</span>}
               {plan.assignee && <span style={{ background: "#fce4ec", color: "#c62828", padding: "2px 8px", borderRadius: 4, fontSize: 12 }}>assignee: {plan.assignee}</span>}
               {plan.dateRange && <span style={{ background: "#e0f7fa", color: "#00695c", padding: "2px 8px", borderRadius: 4, fontSize: 12 }}>range: last {plan.dateRange}d</span>}
-              {plan.groupBy && <span style={{ background: "#f5f5f5", color: "#333", padding: "2px 8px", borderRadius: 4, fontSize: 12 }}>group: {plan.groupBy}</span>}
-              <span style={{ background: "#f5f5f5", color: "#333", padding: "2px 8px", borderRadius: 4, fontSize: 12 }}>chart: {plan.chartType}</span>
+              {plan.groupBy && <span style={{ background: "#f5ede3", color: "#333", padding: "2px 8px", borderRadius: 4, fontSize: 12 }}>group: {plan.groupBy}</span>}
+              <span style={{ background: "#f5ede3", color: "#333", padding: "2px 8px", borderRadius: 4, fontSize: 12 }}>chart: {plan.chartType}</span>
             </div>
             {/* Warnings */}
             {plan.warnings && plan.warnings.map((w, i) => (
