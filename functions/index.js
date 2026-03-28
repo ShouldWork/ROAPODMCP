@@ -175,12 +175,19 @@ const CONTACT_SYNC_MAX_PAGES = 5; // 500 contacts per invocation — keeps runti
 
 function extractContactFields(contact) {
   const name = contact.name || null;
+  // Podium API returns phoneNumbers as strings or objects depending on endpoint
+  const rawPhone = contact.phoneNumbers?.[0];
+  const phone = (typeof rawPhone === "string" ? rawPhone : rawPhone?.number)
+    ?? contact.phone ?? contact.channels?.[0]?.identifier ?? null;
+  const rawEmail = contact.emails?.[0];
+  const email = (typeof rawEmail === "string" ? rawEmail : rawEmail?.address)
+    ?? contact.email ?? null;
   return {
     uid: contact.uid || null,
     name,
     contactNameLower: name ? name.toLowerCase() : null,
-    phone: contact.phoneNumbers?.[0]?.number ?? contact.phone ?? null,
-    email: contact.emails?.[0]?.address ?? contact.email ?? null,
+    phone,
+    email,
     updatedAt: contact.updatedAt || null,
     createdAt: contact.createdAt || null,
     locationUid: CONTACT_SYNC_LOCATION_UID,
@@ -370,6 +377,208 @@ function createMcpServer(accessToken) {
   const api = podiumClient(accessToken);
   const db = getFirestore();
 
+  // ── API Fallback + Auto-Backfill helpers ─────────────────────────────────
+  // When Firestore returns empty results for a contact/conversation search,
+  // these helpers fall through to the live Podium API, backfill the missing
+  // records, and return results with source: "api_fallback".
+  //
+  // Strategy: messages-first. The most common gap is messages ingested via
+  // webhook but the parent contact/conversation docs missing. So we check
+  // podium_messages first for contactUid + conversationUid references, then
+  // fetch the full records from the Podium API to backfill. If messages don't
+  // exist either, we try the Podium contacts API search as a last resort.
+
+  function mapApiConversationToFirestore(conv) {
+    return {
+      uid: conv.uid,
+      contactName: conv.contactName || null,
+      contactNameLower: conv.contactName ? conv.contactName.toLowerCase() : null,
+      contactUid: conv.contactUid || null,
+      contactEmail: conv.contactEmail || null,
+      phone: conv.channel?.identifier || null,
+      channelType: conv.channel?.type || null,
+      status: conv.closed ? "closed" : "open",
+      assignedUserUid: conv.assignedUserUid || null,
+      locationUid: conv.locationUid || null,
+      createdAt: conv.createdAt ? new Date(conv.createdAt) : null,
+      updatedAt: conv.updatedAt ? new Date(conv.updatedAt) : null,
+      lastItemAt: conv.lastItemAt ? new Date(conv.lastItemAt) : null,
+      _ingestedAt: new Date(),
+      _source: "api_fallback",
+    };
+  }
+
+  /**
+   * Main fallback: search for a contact by name/phone/email, backfill missing
+   * records, and return { contacts: [...], conversations: [...] }.
+   */
+  async function apiFallbackSearch(searchTerm) {
+    const isPhone = /^\+?\d[\d\s\-()]+$/.test(searchTerm);
+    const contactMap = new Map(); // contactUid → { uid, name, phone, email }
+    const convUids = new Set();
+
+    // ── Step 1: Check podium_messages for this contact ───────────────────
+    let msgSnap;
+    if (!isPhone) {
+      // Exact name match on contactName (most common sync-gap case)
+      msgSnap = await db.collection("podium_messages")
+        .where("contactName", "==", searchTerm)
+        .limit(100)
+        .get();
+    }
+    if (!msgSnap || msgSnap.empty) {
+      // Try case-insensitive by searching with capitalized form
+      const capitalized = searchTerm.split(" ").map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+      if (capitalized !== searchTerm) {
+        msgSnap = await db.collection("podium_messages")
+          .where("contactName", "==", capitalized)
+          .limit(100)
+          .get();
+      }
+    }
+
+    if (msgSnap && !msgSnap.empty) {
+      msgSnap.forEach((d) => {
+        const m = d.data();
+        if (m.contactUid && !contactMap.has(m.contactUid)) {
+          contactMap.set(m.contactUid, { uid: m.contactUid, name: m.contactName });
+        }
+        if (m.conversationUid) convUids.add(m.conversationUid);
+      });
+      console.log(`[API Fallback] Found ${contactMap.size} contact(s) and ${convUids.size} conversation(s) in messages for "${searchTerm}"`);
+    }
+
+    // ── Step 2: For each contact found in messages, fetch full record ────
+    const contacts = [];
+    for (const [cuid, info] of contactMap) {
+      // Try to fetch from API for full contact data
+      let apiContact = null;
+      try {
+        const { data: resp } = await api.get(`/contacts/${cuid}`);
+        apiContact = resp.data || resp; // Unwrap Podium { data: { ... } } envelope
+        // API contact may include conversations[].uid — collect them
+        if (Array.isArray(apiContact.conversations)) {
+          apiContact.conversations.forEach((c) => { if (c.uid) convUids.add(c.uid); });
+        }
+      } catch (e) {
+        // 404 or other error — construct minimal contact from message data
+        console.log(`[API Fallback] Contact ${cuid} not found in API (${e.message}), using message data`);
+        apiContact = { uid: cuid, name: info.name, phoneNumbers: [], emails: [] };
+      }
+
+      const fields = extractContactFields(apiContact);
+      contacts.push(fields);
+
+      // Backfill to podium_contacts (fire-and-forget)
+      const ref = db.collection("podium_contacts").doc(cuid);
+      ref.get().then((doc) => {
+        if (!doc.exists) {
+          ref.set({ ...fields, _ingestedAt: new Date(), _source: "api_fallback" }, { merge: true })
+            .then(() => console.log(`[API Fallback] Backfilled contact: ${fields.name} (${cuid})`))
+            .catch((e) => console.error(`[API Fallback] Failed to write contact ${cuid}:`, e.message));
+        }
+      }).catch(() => {});
+    }
+
+    // ── Step 3: If messages had nothing, try Podium API search ───────────
+    if (contactMap.size === 0) {
+      try {
+        // Try known param names — Podium v4 /contacts is strict about allowed params
+        let apiContacts = [];
+        const paramNames = ["q", "name", "searchTerm", "search", "phoneNumber", "phone"];
+        for (const paramName of paramNames) {
+          try {
+            const apiParams = buildParams({ [paramName]: searchTerm, limit: 10 });
+            const { data: apiData } = await api.get("/contacts", { params: apiParams });
+            apiContacts = Array.isArray(apiData.data) ? apiData.data : [];
+            console.log(`[API Fallback] Param "${paramName}" accepted by Podium API`);
+            break;
+          } catch (e) {
+            if (e.response?.status === 400) continue;
+            throw e;
+          }
+        }
+
+        // If no search param worked, paginate and filter client-side (up to 5 pages)
+        if (apiContacts.length === 0) {
+          const lower = searchTerm.toLowerCase();
+          let cursor = null;
+          for (let page = 0; page < 5; page++) {
+            const params = buildParams({ limit: 100, cursor });
+            const { data: listData } = await api.get("/contacts", { params });
+            const batch = Array.isArray(listData.data) ? listData.data : [];
+            for (const c of batch) {
+              const cName = (c.name || "").toLowerCase();
+              const cPhone = (c.phoneNumbers || []).join(" ");
+              if (cName.includes(lower) || cPhone.includes(searchTerm)) {
+                apiContacts.push(c);
+              }
+            }
+            cursor = listData.metadata?.nextCursor;
+            if (!cursor || batch.length === 0 || apiContacts.length >= 10) break;
+          }
+        }
+
+        for (const ac of apiContacts) {
+          const fields = extractContactFields(ac);
+          contacts.push(fields);
+          // Collect conversation UIDs from contact response
+          if (Array.isArray(ac.conversations)) {
+            ac.conversations.forEach((c) => { if (c.uid) convUids.add(c.uid); });
+          }
+          // Backfill contact (fire-and-forget)
+          if (fields.uid) {
+            const ref = db.collection("podium_contacts").doc(fields.uid);
+            ref.get().then((doc) => {
+              if (!doc.exists) {
+                ref.set({ ...fields, _ingestedAt: new Date(), _source: "api_fallback" }, { merge: true })
+                  .then(() => console.log(`[API Fallback] Backfilled contact: ${fields.name} (${fields.uid})`))
+                  .catch((e) => console.error(`[API Fallback] Failed to write contact:`, e.message));
+              }
+            }).catch(() => {});
+          }
+        }
+        if (apiContacts.length > 0) {
+          console.log(`[API Fallback] API search found ${apiContacts.length} contact(s) for "${searchTerm}"`);
+        }
+      } catch (apiErr) {
+        console.error(`[API Fallback] API contact search failed: ${apiErr.message}`);
+      }
+    }
+
+    // ── Step 4: Fetch and backfill missing/stub conversations ─────────────
+    const conversations = [];
+    for (const cuid of convUids) {
+      const ref = db.collection("podium_conversations").doc(cuid);
+      const existing = await ref.get();
+      const isStub = existing.exists && !existing.data().contactName;
+
+      if (existing.exists && !isStub) {
+        // Full doc exists — use as-is
+        conversations.push({ uid: cuid, ...existing.data() });
+      } else {
+        // Missing or stub (webhook wrote lastItemAt but no contactName) — enrich from API
+        try {
+          const { data: resp } = await api.get(`/conversations/${cuid}`);
+          const fields = mapApiConversationToFirestore(resp.data || resp);
+          conversations.push(fields);
+          // Fire-and-forget write (merge enriches the stub)
+          ref.set(fields, { merge: true })
+            .then(() => console.log(`[API Fallback] ${isStub ? "Enriched stub" : "Backfilled"} conversation: ${fields.contactName} (${cuid})`))
+            .catch((e) => console.error(`[API Fallback] Failed to write conversation ${cuid}:`, e.message));
+        } catch (err) {
+          console.error(`[API Fallback] Failed to fetch conversation ${cuid} from API:`, err.message);
+          // If API fails, return stub data if we have it
+          if (existing.exists) {
+            conversations.push({ uid: cuid, ...existing.data() });
+          }
+        }
+      }
+    }
+
+    return { contacts, conversations };
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   // FIRESTORE TOOLS — PRIMARY DATA SOURCE
   // These query the local Firestore database (20k+ conversations indexed).
@@ -423,7 +632,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "fs_conversations",
-    "Query conversations from Firestore with full filtering and sorting. Supports filtering by status (open/closed), assigned coach, contact name search, and date ranges. Results are sorted by lastItemAt descending (most recent first). ALWAYS use this instead of get_conversations unless explicitly asked for live Podium API data.",
+    "Query conversations from Firestore with full filtering and sorting. Supports filtering by status (open/closed), assigned coach, contact name search, and date ranges. Results are sorted by lastItemAt descending (most recent first). ALWAYS use this instead of get_conversations unless explicitly asked for live Podium API data. If Firestore returns no results for a contact name/phone/email search, automatically falls back to the live Podium API and backfills missing data. Fallback results include source: 'api_fallback' to indicate they were fetched from the live API.",
     {
       status: z.enum(["open", "closed"]).optional().describe("Filter by conversation status. Omit for all."),
       assignedUserUid: z.string().optional().describe("Filter by assigned user UID."),
@@ -503,14 +712,46 @@ function createMcpServer(accessToken) {
 
         results = results.slice(0, cap);
 
+        // ── API Fallback: if Firestore returned nothing for a contact search ──
+        if (results.length === 0 && (contactName || phone || email)) {
+          // Verify this is genuinely missing, not just filtered-empty
+          let shouldFallback = true;
+          const hasAdditionalFilters = !!(status || resolvedUid || staleAfterDays || activeWithinDays);
+          if (hasAdditionalFilters && contactName && contactName.length >= 2) {
+            const prefix = contactName.toLowerCase();
+            const existCheck = await db.collection("podium_conversations")
+              .where("contactNameLower", ">=", prefix)
+              .where("contactNameLower", "<=", prefix + "\uffff")
+              .limit(1)
+              .get();
+            if (!existCheck.empty) shouldFallback = false; // Contact exists, just filtered out
+          }
+
+          if (shouldFallback) {
+            try {
+              const searchTerm = contactName || phone || email;
+              const fallback = await apiFallbackSearch(searchTerm);
+
+              for (const conv of fallback.conversations) {
+                results.push({
+                  ...conv,
+                  source: "api_fallback",
+                });
+              }
+            } catch (fallbackErr) {
+              console.error("[API Fallback] fs_conversations fallback failed:", fallbackErr.message);
+            }
+          }
+        }
+
         // Resolve user names
         const userMap = await getCachedUserMap();
 
         results = results.map((c) => ({
           ...c,
           assignedUserName: userMap[c.assignedUserUid]?.name || "Unassigned",
-          lastItemAt: c.lastItemAt?.toDate?.()?.toISOString() || c.lastItemAt,
-          createdAt: c.createdAt?.toDate?.()?.toISOString() || c.createdAt,
+          lastItemAt: c.lastItemAt?.toDate?.()?.toISOString?.() || c.lastItemAt?.toISOString?.() || c.lastItemAt,
+          createdAt: c.createdAt?.toDate?.()?.toISOString?.() || c.createdAt?.toISOString?.() || c.createdAt,
         }));
 
         return ok({ data: results, count: results.length });
@@ -552,7 +793,7 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "fs_search_contacts",
-    "Search contacts and conversations in Firestore by name, phone, or email. Searches both podium_contacts and podium_conversations collections. Returns deduplicated results.",
+    "Search contacts and conversations in Firestore by name, phone, or email. Searches both podium_contacts and podium_conversations collections. Returns deduplicated results. If Firestore returns no results, automatically falls back to the live Podium API, backfills missing contacts and their associated conversations, and returns results with source: 'api_fallback'.",
     {
       query: z.string().describe("Search term — name, phone number, or email."),
       limit: z.number().optional().describe("Max results (default 20)."),
@@ -637,6 +878,46 @@ function createMcpServer(accessToken) {
             }
           }
         });
+
+        // ── API Fallback: if Firestore returned nothing, search messages → API ──
+        if (results.length === 0) {
+          try {
+            const fallback = await apiFallbackSearch(searchTerm);
+
+            for (const c of fallback.contacts) {
+              const key = (c.name || "") + (c.phone || "");
+              if (!seen.has(key)) {
+                seen.add(key);
+                results.push({
+                  source: "api_fallback",
+                  uid: c.uid,
+                  contactName: c.name,
+                  phone: c.phone,
+                  email: c.email,
+                });
+              }
+            }
+            for (const conv of fallback.conversations) {
+              const key = (conv.contactName || "") + (conv.phone || "");
+              if (!seen.has(key)) {
+                seen.add(key);
+                results.push({
+                  source: "api_fallback",
+                  uid: conv.uid,
+                  contactName: conv.contactName,
+                  phone: conv.phone,
+                  email: conv.contactEmail || null,
+                  contactUid: conv.contactUid || null,
+                  status: conv.status,
+                  lastItemAt: conv.lastItemAt?.toDate?.()?.toISOString?.() || conv.lastItemAt?.toISOString?.() || conv.lastItemAt,
+                  assignedUserUid: conv.assignedUserUid,
+                });
+              }
+            }
+          } catch (fallbackErr) {
+            console.error("[API Fallback] fs_search_contacts fallback failed:", fallbackErr.message);
+          }
+        }
 
         return ok({ data: results.slice(0, cap), count: Math.min(results.length, cap) });
       } catch (err) { return fail(err); }
@@ -973,16 +1254,49 @@ function createMcpServer(accessToken) {
 
   server.tool(
     "search_contacts",
-    "[LIVE API — use fs_search_contacts instead] Search contacts directly from Podium API.",
+    "[LIVE API — use fs_search_contacts instead] Search contacts directly from Podium API. Tries multiple API param names, then falls back to paginated client-side filtering.",
     {
-      query: z.string().describe("Search query (name, phone, or email)."),
+      query: z.string().describe("Search query (name or phone number)."),
       limit: z.number().optional().describe("Max results (default 10, max 100)."),
     },
     async ({ query, limit }) => {
       try {
-        const params = buildParams({ q: query, limit });
-        const { data } = await api.get("/contacts", { params });
-        return ok(data);
+        const cap = limit || 10;
+        // Try known param names — Podium v4 /contacts is strict about allowed params
+        const paramNames = ["q", "name", "searchTerm", "search", "phoneNumber", "phone"];
+        for (const paramName of paramNames) {
+          try {
+            const params = buildParams({ [paramName]: query, limit: cap });
+            const { data } = await api.get("/contacts", { params });
+            console.log(`[search_contacts] Param "${paramName}" accepted by Podium API`);
+            return ok(data);
+          } catch (e) {
+            if (e.response?.status === 400) continue; // param rejected, try next
+            throw e; // non-400 error, propagate
+          }
+        }
+        // All param names rejected — fall back to paginated client-side filtering
+        console.log("[search_contacts] No search params accepted, falling back to client-side filter");
+        const lower = query.toLowerCase();
+        const matches = [];
+        let cursor = null;
+        for (let page = 0; page < 10 && matches.length < cap; page++) {
+          const params = buildParams({ limit: 100, cursor });
+          const { data } = await api.get("/contacts", { params });
+          const contacts = Array.isArray(data.data) ? data.data : [];
+          for (const c of contacts) {
+            const cName = (c.name || "").toLowerCase();
+            const cPhone = (c.phoneNumbers || []).join(" ");
+            const cEmail = (c.emails || []).join(" ").toLowerCase();
+            if (cName.includes(lower) || cPhone.includes(query) || cEmail.includes(lower)) {
+              matches.push(c);
+              if (matches.length >= cap) break;
+            }
+          }
+          cursor = data.metadata?.nextCursor;
+          if (!cursor || contacts.length === 0) break;
+        }
+        return ok({ data: matches, count: matches.length, note: "Client-side filtered (Podium API has no search param)" });
       } catch (err) { return fail(err); }
     }
   );
