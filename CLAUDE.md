@@ -36,7 +36,7 @@ node backfill.js --resume               # Resume interrupted import
 ### Deployment
 ```bash
 # Functions (deploy only our functions — other functions exist in roa-support)
-firebase deploy --only functions:podiumOAuthStart,functions:podiumOAuthCallback,functions:podiumRefreshToken,functions:podiumMcp,functions:podiumWebhook
+firebase deploy --only functions:podiumOAuthStart,functions:podiumOAuthCallback,functions:podiumRefreshToken,functions:podiumMcp,functions:podiumWebhook,functions:podiumConversationEnrich
 
 # Firestore indexes (takes 5-10 min to build)
 firebase deploy --only firestore:indexes
@@ -60,6 +60,9 @@ Single file containing all Cloud Functions. Uses Firebase Functions v2 (`onReque
 - `podiumRefreshToken` — Manual token refresh
 - `podiumMcp` — MCP server (StreamableHTTPServerTransport, stateless, CORS open)
 - `podiumWebhook` — Real-time Podium webhook receiver (HMAC-SHA256 verification)
+
+**Scheduled:**
+- `podiumConversationEnrich` — Every 15 min, finds conversation stubs (missing `contactName`) and enriches from Podium API. Also backfills associated contacts.
 
 **MCP tools (30+):**
 - **Firestore tools** (preferred, fast): `fs_dashboard_stats`, `fs_conversations`, `fs_messages`, `fs_search_contacts`, `fs_users`, `fs_follow_up_priority`, `fs_coach_workload`, `fs_campaign_search`, `fs_name_quality`

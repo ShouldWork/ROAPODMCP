@@ -169,9 +169,30 @@ function fail(err) {
   return { content: [{ type: "text", text: `Error (${status || "unknown"}): ${message}` }], isError: true };
 }
 
-// ── Contact Sync helpers ───────────────────────────────────────────────────
+// ── Contact & Conversation mapping helpers ─────────────────────────────────
 
 const CONTACT_SYNC_MAX_PAGES = 5; // 500 contacts per invocation — keeps runtime under 60s
+
+/** Map a Podium API conversation object to Firestore document fields. */
+function mapApiConversationToFirestore(conv, source = "api_fallback") {
+  return {
+    uid: conv.uid,
+    contactName: conv.contactName || null,
+    contactNameLower: conv.contactName ? conv.contactName.toLowerCase() : null,
+    contactUid: conv.contactUid || null,
+    contactEmail: conv.contactEmail || null,
+    phone: conv.channel?.identifier || null,
+    channelType: conv.channel?.type || null,
+    status: conv.closed ? "closed" : "open",
+    assignedUserUid: conv.assignedUserUid || null,
+    locationUid: conv.locationUid || null,
+    createdAt: conv.createdAt ? new Date(conv.createdAt) : null,
+    updatedAt: conv.updatedAt ? new Date(conv.updatedAt) : null,
+    lastItemAt: conv.lastItemAt ? new Date(conv.lastItemAt) : null,
+    _ingestedAt: new Date(),
+    _source: source,
+  };
+}
 
 function extractContactFields(contact) {
   const name = contact.name || null;
@@ -387,26 +408,6 @@ function createMcpServer(accessToken) {
   // podium_messages first for contactUid + conversationUid references, then
   // fetch the full records from the Podium API to backfill. If messages don't
   // exist either, we try the Podium contacts API search as a last resort.
-
-  function mapApiConversationToFirestore(conv) {
-    return {
-      uid: conv.uid,
-      contactName: conv.contactName || null,
-      contactNameLower: conv.contactName ? conv.contactName.toLowerCase() : null,
-      contactUid: conv.contactUid || null,
-      contactEmail: conv.contactEmail || null,
-      phone: conv.channel?.identifier || null,
-      channelType: conv.channel?.type || null,
-      status: conv.closed ? "closed" : "open",
-      assignedUserUid: conv.assignedUserUid || null,
-      locationUid: conv.locationUid || null,
-      createdAt: conv.createdAt ? new Date(conv.createdAt) : null,
-      updatedAt: conv.updatedAt ? new Date(conv.updatedAt) : null,
-      lastItemAt: conv.lastItemAt ? new Date(conv.lastItemAt) : null,
-      _ingestedAt: new Date(),
-      _source: "api_fallback",
-    };
-  }
 
   /**
    * Main fallback: search for a contact by name/phone/email, backfill missing
@@ -1897,5 +1898,96 @@ Rules:
       console.error("Dashboard AI error:", err.message);
       res.status(500).json({ error: "AI service temporarily unavailable" });
     }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════════════════
+// Conversation Enrichment — periodic job to fill in conversation stubs
+// ══════════════════════════════════════════════════════════════════════════
+//
+// The webhook writes conversation docs with only lastItemAt/lastMessageAt
+// (merge-writes from message events). This scheduled job finds those stubs
+// and enriches them with full data from the Podium API: contactName, phone,
+// status, assignedUserUid, etc.
+
+const { onSchedule } = require("firebase-functions/v2/scheduler");
+
+exports.podiumConversationEnrich = onSchedule(
+  {
+    schedule: "every 15 minutes",
+    timeZone: "America/Denver",
+    timeoutSeconds: 300,
+    memory: "512MiB",
+    secrets: [PODIUM_CLIENT_ID, PODIUM_CLIENT_SECRET],
+  },
+  async () => {
+    const db = getFirestore();
+    const accessToken = await getPodiumAccessToken(
+      PODIUM_CLIENT_ID.value(),
+      PODIUM_CLIENT_SECRET.value()
+    );
+    const api = podiumClient(accessToken);
+
+    const stats = { found: 0, enriched: 0, failed: 0, alreadyFull: 0 };
+
+    // Find conversation stubs: docs that exist but are missing contactName
+    // These were created by webhook merge-writes (message events)
+    const stubSnap = await db.collection("podium_conversations")
+      .where("contactName", "==", null)
+      .limit(50) // batch size per run — stay within rate limits
+      .get();
+
+    if (stubSnap.empty) {
+      console.log("[ConvEnrich] No stubs found — all conversations are enriched");
+      return;
+    }
+
+    stats.found = stubSnap.size;
+    console.log(`[ConvEnrich] Found ${stats.found} conversation stubs to enrich`);
+
+    for (const doc of stubSnap.docs) {
+      const convUid = doc.id;
+      try {
+        const { data: resp } = await api.get(`/conversations/${convUid}`);
+        const conv = resp.data || resp;
+
+        if (!conv.contactName) {
+          stats.alreadyFull++;
+          continue; // API also has no contactName — nothing to enrich with
+        }
+
+        const fields = mapApiConversationToFirestore(conv, "conversation_enrich");
+        await db.collection("podium_conversations").doc(convUid).set(fields, { merge: true });
+        stats.enriched++;
+
+        // Also backfill the contact if missing
+        const contactUid = conv.contactUid;
+        if (contactUid) {
+          const contactRef = db.collection("podium_contacts").doc(contactUid);
+          const contactDoc = await contactRef.get();
+          if (!contactDoc.exists) {
+            try {
+              const { data: contactResp } = await api.get(`/contacts/${contactUid}`);
+              const contactData = contactResp.data || contactResp;
+              const contactFields = extractContactFields(contactData);
+              await contactRef.set({
+                ...contactFields,
+                _ingestedAt: new Date(),
+                _source: "conversation_enrich",
+              }, { merge: true });
+              console.log(`[ConvEnrich] Backfilled contact: ${contactFields.name} (${contactUid})`);
+            } catch (contactErr) {
+              // Contact might not exist in API (deleted) — not fatal
+              console.log(`[ConvEnrich] Contact ${contactUid} not in API: ${contactErr.message}`);
+            }
+          }
+        }
+      } catch (err) {
+        stats.failed++;
+        console.error(`[ConvEnrich] Failed to enrich ${convUid}: ${err.message}`);
+      }
+    }
+
+    console.log(`[ConvEnrich] Done: ${JSON.stringify(stats)}`);
   }
 );
